@@ -1,0 +1,30 @@
+# ==================================================================================================================== #
+#                                               DEMO CONFIGURATION                                                    #
+# ==================================================================================================================== #
+
+head_detector:
+    # Select the backend used to propose head crops for the demo pipeline.
+    # Use `yolo` to keep the original head detector.
+    # Use `sam` to let SAM prompt the scene with text queries such as `face` or `eyes`.
+    type: sam
+
+    yolo:
+        weights: ./weights/yolov5m_crowdhuman.pt
+        conf: 0.25
+        iou: 0.45
+        classes: [1]
+        imgsz: 640
+        amp: False
+
+    sam:
+        model: /home/icub/code/sam3.1/sam3.1_multiplex.pt
+        prompts: [eyes]
+        conf: 0.2
+        imgsz: 644
+        half: True
+        device: cuda:0
+        task: segment
+        mode: predict
+        save: False
+        verbose: False
+        iou: 0.45

@@ -15,6 +15,18 @@ import torch.nn.functional as F
 def compute_sharingan_loss(gaze_vec_gt, gaze_heatmap_gt, inout_gt, gaze_vec_pred, gaze_heatmap_pred, inout_pred, w_hm=1000, w_ang=3, w_bce=0):
     heatmap_loss = torch.tensor(0.0)
     angular_loss = torch.tensor(0.0)
+
+    # valid_count = torch.sum(inout_gt)
+
+    # print(
+    #     "[LOSS DEBUG]",
+    #     "valid_count =", valid_count.item(),
+    #     "inout_gt min/max =", inout_gt.min().item(), inout_gt.max().item(),
+    #     "num_positive =", (inout_gt > 0).sum().item(),
+    # )
+
+    # if torch.sum(inout_gt) == 0:
+    #     raise RuntimeError("Found batch with inout_gt sum == 0")
         
     if torch.sum(inout_gt) > 0:  # to avoid case where all samples of the batch are outside (i.e. division by 0)
         heatmap_loss = compute_heatmap_loss(gaze_heatmap_pred, gaze_heatmap_gt, inout_gt)
@@ -40,15 +52,43 @@ def compute_dist_loss(gp_pred, gp_gt, io_gt):
     return dist_loss
 
 def compute_heatmap_loss(hm_pred, hm_gt, io_gt):
-    heatmap_loss = F.mse_loss(hm_pred, hm_gt, reduce=False).mean([1, 2])
+    heatmap_loss = F.mse_loss(hm_pred, hm_gt, reduction="none").mean([1, 2])
     heatmap_loss = torch.mul(heatmap_loss, io_gt)
     heatmap_loss = torch.sum(heatmap_loss) / torch.sum(io_gt)
     return heatmap_loss
 
 def compute_angular_loss(gv_pred, gv_gt, io_gt):
+
+    # print("[GV_GT CHECK]",
+    #     torch.isfinite(gv_gt).all().item(),
+    #     gv_gt.min().item(),
+    #     gv_gt.max().item())
+
+    # print("[GV_PRED CHECK]",
+    #     torch.isfinite(gv_pred).all().item(),
+    #     gv_pred.min().item(),
+    #     gv_pred.max().item())
+    
+    # if not torch.isfinite(gv_gt).all():
+    #     print("BAD gv_gt FOUND!")
+    #     print(gv_gt)
+    #     raise RuntimeError
+
     angular_loss = (1 - torch.einsum("ij,ij->i", gv_pred, gv_gt)) / 2
     angular_loss = torch.mul(angular_loss, io_gt)
     angular_loss = torch.sum(angular_loss) / torch.sum(io_gt)
+
+    # den = torch.sum(io_gt)
+
+    # print("[ANGULAR]", "den =", den.item())
+
+    # angular_loss2 = torch.mul(angular_loss, io_gt)
+
+    # print("[ANGULAR]", "masked_sum =", torch.sum(angular_loss2).item())
+
+    # if den == 0:
+    #     print("[ANGULAR WARNING] zero denominator detected!")
+
     return angular_loss
 
 def compute_bce_loss(io_pred, io_gt, use_focal_loss=False, gamma=2):

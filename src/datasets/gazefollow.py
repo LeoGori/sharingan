@@ -148,6 +148,51 @@ class GazeFollowDataset(Dataset):
         target_head_center =  torch.stack([target_head_bbox[0, [0, 2]].mean(), target_head_bbox[0, [1, 3]].mean()])
         target_head_center /= torch.tensor([img_w, img_h], dtype=torch.float)
 
+
+        ## For context people, read annotations of eyes detection
+        context_eyes_bboxes = torch.zeros((0, 4))
+        eyes_detections = None
+        eyes_ok = False
+        if (self.num_people == -1) or (self.num_people > 1):
+            eyes_det_file = f"gt/{split}/{partition}/annotated/{basename}-eyes-detections.npy"
+            # check if eyes detections file exists
+            if os.path.exists(os.path.join(self.root, eyes_det_file)):
+
+                eyes_detections = np.load(os.path.join(self.root, eyes_det_file))
+
+                if len(eyes_detections) > 0:
+
+                    eyes_ok = True
+
+                    # extract the target person's eyes bbox (the first one in the list) and remove it from the context eyes bboxes
+                    target_eyes_bbox = torch.tensor(eyes_detections[0, :-1]).unsqueeze(0)
+                    eyes_detections = eyes_detections[1:]
+
+                    # Process context eyes bboxes
+                    if len(eyes_detections) > 0:
+                        scores = torch.tensor(eyes_detections[:, -1])
+                        context_eyes_bboxes = torch.tensor(eyes_detections[(scores >= self.head_thr).tolist(), :-1])
+                        ious = box_iou(context_eyes_bboxes, target_eyes_bbox).flatten()
+                        # TODO: parametrize iou threshold
+                        context_eyes_bboxes = context_eyes_bboxes[ious <= 0.5]
+
+                    # Shuffle context people and keep the first `num_people - 1` indices
+                    if self.split == "train":
+                        perm_indices = torch.randperm(context_eyes_bboxes.size(0))
+                        context_eyes_bboxes = context_eyes_bboxes[perm_indices]
+                    num_context_eyes = len(context_eyes_bboxes)
+                    num_keep = num_context_eyes if self.num_people == -1 else self.num_people - 1
+                    context_eyes_bboxes = context_eyes_bboxes[:num_keep]
+
+        if inout == 0:
+            if eyes_ok:
+                # make the gaze point the center of the eyes from the target eyes bbox
+                gaze_pt = torch.tensor([(target_eyes_bbox[0, 0] + target_eyes_bbox[0, 2]) / 2, (target_eyes_bbox[0, 1] + target_eyes_bbox[0, 3]) / 2], dtype=torch.float)
+            else:
+                # make the gaze point the center of the head from the target head bbox
+                gaze_pt = torch.tensor([(target_head_bbox[0, 0] + target_head_bbox[0, 2]) / 2, (target_head_bbox[0, 1] + target_head_bbox[0, 3]) / 2], dtype=torch.float)
+                
+
         ## For context people (ie. detected w/ Yolo)
         context_head_bboxes = torch.zeros((0, 4))
         if (self.num_people == -1) or (self.num_people > 1):
@@ -170,8 +215,15 @@ class GazeFollowDataset(Dataset):
             num_keep = num_context_heads if self.num_people == -1 else self.num_people - 1
             context_head_bboxes = context_head_bboxes[:num_keep]
 
-        # Concatenate main head bbox with others and apply jitter
-        head_bboxes = torch.concat([context_head_bboxes, target_head_bbox], dim=0).to(torch.float)
+        if eyes_ok:
+            # Concatenate target head bbox with context eyes bboxes and apply jitter
+            head_bboxes = torch.concat([context_eyes_bboxes, target_eyes_bbox], dim=0).to(torch.float)
+        else:
+            # Concatenate target head bbox with context head bboxes and apply jitter
+            head_bboxes = torch.concat([context_head_bboxes, target_head_bbox], dim=0).to(torch.float)
+
+        # # Concatenate main head bbox with others and apply jitter
+        # head_bboxes = torch.concat([context_head_bboxes, target_head_bbox], dim=0).to(torch.float)
         if self.split == "train":
             head_bboxes = self.jitter_bbox(head_bboxes, img_w, img_h)
 

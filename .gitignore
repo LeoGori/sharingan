@@ -23,3 +23,9 @@ lightning_logs/
 wandb/
 .hydra/
 .vscode/
+SAM
+YOLO
+data
+customData
+samples
+samples-test

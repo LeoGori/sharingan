@@ -22,6 +22,7 @@ from termcolor import colored
 from src.datasets.childplay import ChildPlayDataModule
 from src.datasets.gazefollow import GazeFollowDataModule
 from src.datasets.videoattentiontarget import VideoAttentionTargetDataModule
+from src.datasets.customDS import CustomDataModule
 from src.modeling.sharingan import SharinganModule
 from src.tracking import init_logger
 
@@ -114,6 +115,21 @@ class Experiment(BaseExperiment):
                     "test": self.cfg.test.batch_size,
                 },
                 stride=self.cfg.data.stride,
+                image_size=self.cfg.data.image_size,
+                heatmap_size=self.cfg.data.heatmap_size,
+                heatmap_sigma=self.cfg.data.heatmap_sigma,
+                num_people=self.cfg.data.num_people,
+                return_head_mask=self.cfg.data.return_head_mask,
+            )
+        elif self.cfg.experiment.dataset == "custom":
+            data = CustomDataModule(
+                root=self.cfg.data.custom.root,
+                root_annotations=self.cfg.data.custom.root_annotations,
+                batch_size={
+                    "train": self.cfg.train.batch_size,
+                    "val": self.cfg.val.batch_size,
+                    "test": self.cfg.test.batch_size,
+                },
                 image_size=self.cfg.data.image_size,
                 heatmap_size=self.cfg.data.heatmap_size,
                 heatmap_sigma=self.cfg.data.heatmap_sigma,

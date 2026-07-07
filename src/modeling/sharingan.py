@@ -37,6 +37,13 @@ from src.utils.common import build_2d_sincos_posemb, pair, spatial_argmax2d
 
 TERM_COLOR = "cyan"
 
+def check_tensor(name, x):
+    if not torch.isfinite(x).all():
+        print(f"[NaN/Inf] {name}")
+        print(f"  min={x.nan_to_num().min()}")
+        print(f"  max={x.nan_to_num().max()}")
+        raise RuntimeError(f"{name} contains NaN/Inf")
+
 
 # ==================================================================================================================
 #                                           SHARINGAN LIGHTNING MODULE                                             #
@@ -72,6 +79,8 @@ class SharinganModule(pl.LightningModule):
             self.num_train_samples = math.ceil(cfg.data.vat.num_train_samples / cfg.data.stride)
         elif self.dataset == "childplay":
             self.num_train_samples = math.ceil(cfg.data.cp.num_train_samples / cfg.data.stride)
+        elif self.dataset == "custom":
+            self.num_train_samples = cfg.data.custom.num_train_samples
         else:
             raise ValueError(f"Dataset {self.dataset} not supported.")
         self.num_steps_in_epoch = math.ceil(self.num_train_samples / cfg.train.batch_size)
@@ -314,10 +323,32 @@ class SharinganModule(pl.LightningModule):
         inout_pred = inout_pred[:, -1, :].squeeze(1)  # (b, n, 1) >> (b, 1) >> (b,)
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
+        
+        # for name, t in {
+        #     "gaze_heatmap_pred during training step": gaze_heatmap_pred,
+        #     "inout_pred during training step": inout_pred,
+        #     "gaze_vec_pred during training step": gaze_vec_pred,
+        #     "gaze_pt_pred during training step": gaze_pt_pred,
+        # }.items():
+        #     print(
+        #         name,
+        #         torch.isfinite(t).all().item(),
+        #         t.min().item(),
+        #         t.max().item(),
+        #     )
+
+        # if not torch.isfinite(gaze_heatmap_pred).all():
+        #     print("NaNs already present in heatmap prediction during training step.")
+        #     raise RuntimeError
 
         # Compute loss
         loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
                                        gaze_vec_pred, gaze_heatmap_pred, inout_pred)
+        
+        # if not torch.isfinite(loss):
+        #     print("LOSS BECAME NON-FINITE")
+        #     print(logs)
+        #     raise RuntimeError("Non-finite loss")
 
         # Logging losses
         self.log("loss/train/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
@@ -338,6 +369,21 @@ class SharinganModule(pl.LightningModule):
         inout_pred = inout_pred[:, -1, :].squeeze(1)  # (b, n, 1) >> (b, 1) >> (b,)
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
+
+        # for name, t in {
+        #     "gaze_heatmap_pred during validation step": gaze_heatmap_pred,
+        #     "inout_pred during validation step": inout_pred
+        # }.items():
+        #     print(
+        #         name,
+        #         torch.isfinite(t).all().item(),
+        #         t.min().item(),
+        #         t.max().item(),
+        #     )
+
+        # if not torch.isfinite(gaze_heatmap_pred).all():
+        #     print("NaNs already present in heatmap prediction during validation step")
+        #     raise RuntimeError
 
         # Compute loss
         loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
@@ -392,11 +438,13 @@ class SharinganModule(pl.LightningModule):
             self.log("metric/test/dist", self.metrics["test_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/ap", self.metrics["test_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
+        # print(batch["path"])
+
         # Build output dict
         step_output = {
             "gp_pred": gaze_pt_pred,
             "inout_pred": inout_pred,
-            "gp_gt": batch["gaze_pt"],
+            "gp_gt": batch["gaze_pt"] if self.dataset != 'custom' else batch["gaze_pt"][0],
             "inout_gt": batch["inout"],
             "path": batch["path"],
             "pid": batch["id"],
@@ -425,7 +473,7 @@ class SharinganModule(pl.LightningModule):
                 gp_pred = output["gp_pred"][k].cpu().numpy()
                 gp_pred_x, gp_pred_y = gp_pred[0], gp_pred[1]
 
-                inout_pred = output["inout_pred"][k].cpu().numpy()
+                inout_pred = output["inout_pred"][k].sigmoid().cpu().numpy()
                 inout_gt = output["inout_gt"][k].cpu().numpy()
 
                 path = output["path"][k]
@@ -539,26 +587,48 @@ class Sharingan(nn.Module):
         b, c, h, w = x["image"].shape
         _, n, _, _, _ = x["heads"].shape  # n = total nb of people
 
+        # print(x['heads'])
+        # print('-' * 50)
+        # print(x['head_bboxes'])
+
+        # if len(x['path']) > 1:
+        #     if x['path'][1] == '/home/icub/code/Synch-Heal/data-collection/framesLeo/task1/cond4/can/2026-06-12_11-27-59/sn-939622072593/color/color_00331.png':
+        #         print("Debugging: Found the specific path in the batch.")
         # Encode Gaze Tokens ===================================================
         gaze_tokens, gaze_vec = self.gaze_encoder(x["heads"], x["head_bboxes"])  # (b, n, d), (b, n, 2)
 
+        # check_tensor("gaze_tokens", gaze_tokens)
+        # check_tensor("gaze_vec", gaze_vec)
+
         # Tokenize Inputs ===================================================
         image_tokens = self.image_tokenizer(x["image"])  # (b, t, d) / t = num_tokens, d = token_dim
+        # check_tensor("image_tokens", image_tokens)
+
+
         input_tokens = torch.cat([image_tokens, gaze_tokens], dim=1)  # (b, t+n, d)
+
+        # check_tensor("input_tokens", input_tokens)
+
         t = image_tokens.shape[1]
 
         # Encode Tokens =====================================================
         output_tokens = self.encoder(input_tokens, return_all_layers=True)  # (b, t+n+g, d) / +g for global tokens / for DPT
+        # for i, layer in enumerate(output_tokens):
+            # check_tensor(f"encoder_layer_{i}", layer)
+
+
         # Keep only gaze tokens (discard image tokens)
         output_gaze_tokens = output_tokens[-1][:, t : t + n, :].reshape(b * n, -1)
 
         # Decode Heatmap =====================================================
         hm_decoder_input = {"input": output_tokens, "image_size": (h, w), "num_people": n}
         gaze_hm = self.heatmap_decoder(hm_decoder_input)  # for Conditional DPT
+        # check_tensor("gaze_hm", gaze_hm)
 
         # Decode InOut ====================================================
         inout_decoder_input = torch.cat([output_gaze_tokens, gaze_tokens.view(b * n, -1)], dim=1)  # (b*n, 2*d)
         inout = self.inout_decoder(inout_decoder_input)  # (b*n, 1)
+        # check_tensor("inout", inout)
         inout = inout.view(b, n, -1)  # (b, n, 1)
 
         return gaze_vec, gaze_hm, inout
@@ -881,8 +951,15 @@ class GazeEncoder(nn.Module):
         b, n, p = head_bbox.shape
         b, n, c, h, w = head.shape
 
+        # print(f"Pos Proj weights: {self.pos_proj.weight}")
+
         head_bbox_emb = self.pos_proj(head_bbox.view(-1, p))  # (b*n, token_dim)
+
+        # print(f"Backbone weights: {self.backbone[0].weight}")
+
         gaze_emb = self.backbone(head.view(-1, c, h, w)).flatten(1, -1) # (b*n, embed_dim)
+
+        # print(f"Gaze proj weights: {self.gaze_proj[0].weight}")
 
         gaze_token = self.gaze_proj(gaze_emb) + head_bbox_emb  # (b*n, token_dim)
         gaze_token = gaze_token.view(b, n, -1) # (b, n, token_dim)

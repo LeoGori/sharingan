@@ -13,6 +13,8 @@ import shutil
 import argparse
 import importlib
 import datetime as dt
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from tqdm import tqdm
 import subprocess as sp
 from omegaconf import OmegaConf
@@ -34,6 +36,10 @@ from src.utils.common import spatial_argmax2d, square_bbox
 from boxmot import DeepOCSORT, BYTETracker, OCSORT
 
 
+DEFAULT_DEMO_CONFIG_PATH = Path(__file__).resolve().parent / "src" / "conf" / "demo.yaml"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
 
 # ================================ ARGS ================================ #
 parser = argparse.ArgumentParser(description="Predict gaze on videos")
@@ -41,6 +47,7 @@ parser.add_argument("--input-dir", type=str, default="data", help="Name of the f
 parser.add_argument("--input-filename", type=str, help="Name of the clip file to process (with extension).")
 parser.add_argument("--output-dir", type=str, default="data", help="Name of the folder where to save the output.")
 parser.add_argument("--heatmap-pid", type=int, default=-1, help="pid of the person to draw the heatmap of.")
+parser.add_argument("--config", type=str, default=str(DEFAULT_DEMO_CONFIG_PATH), help="Path to the demo configuration file.")
 
 parser.add_argument("--filter-by-inout", action='store_true', help="Whether to hide the gaze point when inout < 0.5.")
 parser.add_argument('--no-filter-by-inout', dest='filter_by_inout', action='store_false')
@@ -64,7 +71,8 @@ DET_THR = 0.4 # head detection threshold
 IMG_MEAN = [0.44232, 0.40506, 0.36457]
 IMG_STD = [0.28674, 0.27776, 0.27995]
 
-CKPT_PATH = "checkpoints/videoattentiontarget.pt"
+# CKPT_PATH = "checkpoints/videoattentiontarget.pt"
+CKPT_PATH = "checkpoints/best-v12.ckpt"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(colored(f"Using device: {DEVICE}", TERM_COLOR))
@@ -78,6 +86,31 @@ def expand_bbox(bbox, img_w, img_h, k=0.1):
 	bbox[3] = min(img_h, bbox[3] + k * h)
 	return bbox
 
+
+def to_list(x):
+	if x is None:
+		return None
+
+	if hasattr(x, "cpu"):
+		x = x.cpu()
+
+	if hasattr(x, "numpy"):
+		x = x.numpy()
+
+	if isinstance(x, np.ndarray):
+		return x.tolist()
+
+	if isinstance(x, list):
+		return x
+
+	return x
+
+
+def find_images(input_dir):
+	input_dir = Path(input_dir)
+	images = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+	return sorted(images)
+
 def load_tracker():
 	#tracker = DeepOCSORT(
 	#  model_weights=Path('/idiap/temp/stafasca/weights/tracking/osnet_x0_25_msmt17.pt'),  # which ReID model to use
@@ -88,25 +121,131 @@ def load_tracker():
 	tracker = OCSORT()
 	return tracker
 
-def load_head_detection_model(device):
-	# Load and return the pre-trained head detection model
-	ckpt_path = "./weights/yolov5m_crowdhuman.pt"
-	model = torch.hub.load("ultralytics/yolov5", "custom", path=ckpt_path, verbose=False)
-	model.conf = 0.25  # NMS confidence threshold
-	model.iou = 0.45  # NMS IoU threshold
-	model.classes = [1]  # filter by class, i.e. = [1] for heads
-	model.amp = False  # Automatic Mixed Precision (AMP) inference
-	model = model.to(device)
-	model.eval()
-	return model
+def _empty_detections():
+	return np.empty((0, 6), dtype=np.float32)
 
-def detect_heads(image, model):
-	"""
-	Detect heads in the image using the provided model.
-	Returns a numpy array containing the detected head bboxes and their confidence scores.
-	"""
-	detections = model(image, size=640).pred[0].cpu().numpy()[:, :-1] # filter out the class column
-	return detections
+
+def _results_to_detections(result, class_id=0):
+	detections = []
+
+	boxes_xyxy = to_list(result.boxes.xyxy) if result.boxes is not None and result.boxes.xyxy is not None else []
+	boxes_conf = to_list(result.boxes.conf) if result.boxes is not None and result.boxes.conf is not None else []
+
+	for index, bbox in enumerate(boxes_xyxy):
+		confidence = float(boxes_conf[index]) if index < len(boxes_conf) else 1.0
+		detections.append(np.array([bbox[0], bbox[1], bbox[2], bbox[3], confidence, class_id], dtype=np.float32))
+
+	if not detections:
+		return _empty_detections()
+
+	return np.stack(detections)
+
+
+class BaseHeadDetector:
+	def detect(self, image, frame_path=None):
+		raise NotImplementedError
+
+
+class YoloHeadDetector(BaseHeadDetector):
+	def __init__(self, config, device):
+		ckpt_path = config.get("weights", "./weights/yolov5m_crowdhuman.pt")
+		self.imgsz = int(config.get("imgsz", 640))
+		self.conf = float(config.get("conf", 0.25))
+		self.iou = float(config.get("iou", 0.45))
+		self.classes = config.get("classes", [1])
+		self.amp = bool(config.get("amp", False))
+		self.model = torch.hub.load("ultralytics/yolov5", "custom", path=ckpt_path, verbose=False)
+		self.model.conf = self.conf
+		self.model.iou = self.iou
+		self.model.classes = self.classes
+		self.model.amp = self.amp
+		self.model = self.model.to(device)
+		self.model.eval()
+
+	def detect(self, image, frame_path=None):
+		results = self.model(image, size=self.imgsz).pred[0].cpu().numpy()
+		if results.size == 0:
+			return _empty_detections()
+
+		results = results[results[:, 4] >= self.conf]
+		if results.size == 0:
+			return _empty_detections()
+
+		detections = []
+		for detection in results:
+			bbox = detection[:4]
+			confidence = detection[4]
+			detections.append(np.array([bbox[0], bbox[1], bbox[2], bbox[3], confidence, 0], dtype=np.float32))
+
+		return np.stack(detections) if detections else _empty_detections()
+
+
+class SAMHeadDetector(BaseHeadDetector):
+	def __init__(self, config, device):
+		try:
+			from ultralytics.models.sam import SAM3SemanticPredictor
+		except ImportError as exc:
+			raise ImportError("SAM3 is not available. Install ultralytics with SAM support to use the SAM head detector.") from exc
+
+		overrides = dict(
+			conf=float(config.get("conf", 0.20)),
+			task=str(config.get("task", "segment")),
+			mode=str(config.get("mode", "predict")),
+			imgsz=int(config.get("imgsz", 644)),
+			model=str(config.get("model", "./weights/sam3.1_multiplex.pt")),
+			half=bool(config.get("half", False)),
+			save=bool(config.get("save", False)),
+			verbose=bool(config.get("verbose", False)),
+		)
+		if config.get("iou", None) is not None:
+			overrides["iou"] = float(config.get("iou"))
+		overrides["device"] = str(config.get("device", device))
+
+		# print overrides
+		print(colored(f"Using SAM3 with the following overrides: {overrides}", TERM_COLOR))
+		for key, value in overrides.items():
+			print(colored(f"  {key}: {value}", TERM_COLOR))
+
+		self.prompts = list(config.get("prompts", ["face"]))
+		self.predictor = SAM3SemanticPredictor(overrides=overrides)
+
+	def _set_image(self, image, frame_path=None):
+		if frame_path is not None:
+			self.predictor.set_image(str(frame_path))
+			return
+
+		image_np = np.asarray(image)
+		try:
+			self.predictor.set_image(image_np)
+			return
+		except Exception:
+			pass
+
+		with NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+			image_bgr = image_np[..., ::-1] if image_np.ndim == 3 and image_np.shape[2] == 3 else image_np
+			cv2.imwrite(tmp_file.name, image_bgr)
+			temp_path = tmp_file.name
+
+		try:
+			self.predictor.set_image(temp_path)
+		finally:
+			os.unlink(temp_path)
+
+	def detect(self, image, frame_path=None):
+		self._set_image(image, frame_path=frame_path)
+		results = self.predictor(text=self.prompts)
+		result = results[0] if isinstance(results, list) else results
+		return _results_to_detections(result)
+
+
+def load_head_detector(config, device):
+	config = config or {}
+	detector_type = str(config.get("type", "yolo")).lower()
+	if detector_type == "yolo":
+		return YoloHeadDetector(config.get("yolo", {}), device)
+	if detector_type == "sam":
+		return SAMHeadDetector(config.get("sam", {}), device)
+	raise ValueError(f"Unsupported head detector type: {detector_type}")
 
 def load_sharingan_model(ckpt_path, device):
 	# Build model
@@ -137,12 +276,12 @@ def load_sharingan_model(ckpt_path, device):
 	sharingan.to(device)
 	return sharingan
 
-def predict_gaze(image, sharingan, head_detector, tracker=None):
+def predict_gaze(image, sharingan, head_detector, tracker=None, frame_path=None):
 	# 1. Convert image
 	image_np = np.array(image)
 	img_h, img_w, img_c = image_np.shape
  
-	raw_detections = detect_heads(image_np, head_detector)
+	raw_detections = head_detector.detect(image_np, frame_path=frame_path)
 	detections = []
 	for k, raw_detection in enumerate(raw_detections):
 		bbox, conf = raw_detection[:4], raw_detection[4]
@@ -151,15 +290,25 @@ def predict_gaze(image, sharingan, head_detector, tracker=None):
 			cls_ = np.array([0.])
 			detection = np.concatenate([bbox, conf[None], cls_])
 			detections.append(detection)
-	detections = np.stack(detections)
+	detections = np.stack(detections) if len(detections) > 0 else _empty_detections()
 	num_heads = len(detections)
 	
 	# 2. Detect & track head bboxes 
-	tracks = tracker.update(detections, image_np)
-	if len(tracks) == 0: # sometimes tracker.update returns [] even when detections is not []
-		return torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([])
-	pids = (tracks[:, 4] - 1).astype(int)
-	head_bboxes = torch.from_numpy(tracks[:, :4]).float()
+	# if detections is just one, do not use tracker
+	if detections.shape[0] == 1:
+		head_bboxes = torch.from_numpy(detections[:, :4]).float()
+		pids = torch.tensor([0], dtype=torch.int)
+	else:
+		# select the detection that has the highest confidence
+		detections = detections[np.argsort(detections[:, 4])[::-1]][0]
+		head_bboxes = torch.from_numpy(detections[:4][None, :]).float()
+		pids = torch.tensor([0], dtype=torch.int)
+		# tracks = tracker.update(detections, image_np)
+		# if len(tracks) == 0: # sometimes tracker.update returns [] even when detections is not []
+		# 	return torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([])
+		# pids = (tracks[:, 4] - 1).astype(int)
+		# head_bboxes = torch.from_numpy(tracks[:, :4]).float()
+	
 	t_head_bboxes = square_bbox(head_bboxes, img_w, img_h)
 	
 	# 3. Extract and transform heads
@@ -317,17 +466,26 @@ def draw_gaze(
 			head_center_ul = head_center - (head_center_size // 2)
 			head_center_br = head_center + (head_center_size // 2)
 			cv2.rectangle(canvas, head_center_ul, head_center_br, color, -1) # head center point
-			cv2.circle(canvas, head_center, head_radius, color, thickness) # head circle
+			# draw head bbox
+			cv2.rectangle(canvas, head_bbox_ul, head_bbox_br, color, thickness) #
+			# cv2.circle(canvas, head_center, head_radius, color, thickness) # head circle
 			
 			# Draw header
 			io = inouts[i] if inouts is not None else "-"
-			header_text = f"P{pid}: {io:.2f}"
+
+			# draw io on top of the image
+			# cv2.rectangle(canvas, (xmin, ymin - 20), (xmin + 80, ymin), color, -1)
+			# cv2.putText(canvas, f"{io:.2f}", (xmin + 5, ymin - 5), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), 1, cv2.LINE_AA)
+
+			header_text = f"The gaze is IN frame with confidence: {io:.2f}"
 			(w_text, h_text), _ = cv2.getTextSize(header_text, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)
 			
-			header_ul =  (int(head_center[0] - w_text / 2), int(ymin - thickness / 2))
-			header_br = (int(head_center[0] + w_text / 2), int(ymin + h_text + 5))
+			# header_ul =  (int(head_center[0] - w_text / 2), int(ymin - thickness / 2))
+			# header_br = (int(head_center[0] + w_text / 2), int(ymin + h_text + 5))
+			header_ul =  (0, 0)
+			header_br = (w_text + 10, h_text + 5)
 			cv2.rectangle(canvas, header_ul, header_br, color, -1) # header bbox
-			cv2.putText(canvas, header_text, (header_ul[0], int(ymin + h_text)), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), 1, cv2.LINE_AA) # header text
+			cv2.putText(canvas, header_text, (header_ul[0], int(h_text)), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), 1, cv2.LINE_AA) # header text
 			
 			if gaze_available and (io > io_thr or not filter_by_inout):
 				gp = gaze_points[i]
@@ -341,6 +499,9 @@ def draw_gaze(
 			if gaze_vecs is not None:
 				gv = gaze_vecs[i]
 				cv2.arrowedLine(canvas, head_center, (head_center + gaze_vec_factor * head_radius * gv).astype(int), color, thickness)
+
+			# add to the image the bounding box of the head
+			# cv2.rectangle(canvas, head_bbox_ul, head_bbox_br, color, thickness)
 				
 				
 	# Write frame number
@@ -357,100 +518,68 @@ def draw_gaze(
 
 
 def main():
+	demo_config = OmegaConf.load(args.config)
+	head_detector_config = demo_config.get("head_detector", {})
 
 	start = dt.datetime.now()
 	
 	# Path magic
-	video_file = os.path.join(args.input_dir, args.input_filename)
-	basename, ext = os.path.splitext(args.input_filename)
-	
-	if args.heatmap_pid >= 0:
-		output_file = os.path.join(args.output_dir, f"{basename}-pid{args.heatmap_pid}-pred{ext}")
-	else:
-		output_file = os.path.join(args.output_dir, f"{basename}-pred{ext}")
-	print(colored(f"Processing {video_file}", TERM_COLOR))
+	input_dir = Path(os.path.expanduser(args.input_dir))
+	output_dir = Path(os.path.expanduser(args.output_dir))
+	# input_dir = Path('/home/icub/lgori/video-testing-gaze/images/fruit-images/')
+	# output_dir = Path('/home/icub/lgori/sharingan/video-maria')
+	annotated_root = output_dir / "annotated"
+	annotated_root.mkdir(parents=True, exist_ok=True)
+	images = find_images(input_dir)
+	if len(images) == 0:
+		raise FileNotFoundError(f"No images found in: {input_dir}")
+	print(colored(f"Processing {len(images)} images from {input_dir}", TERM_COLOR))
 
 	# Load models
 	tracker = load_tracker()
-	head_detector = load_head_detection_model(DEVICE)
+	head_detector = load_head_detector(head_detector_config, DEVICE)
 	sharingan = load_sharingan_model(CKPT_PATH, DEVICE)
-	print(colored(f"Loaded tracker, head detector, and sharingan models.", TERM_COLOR))
+	print(colored(f"Loaded tracker, {head_detector_config.get('type', 'yolo')} head detector, and sharingan models.", TERM_COLOR))
+	# Iterate over images and process
+	for image_path in tqdm(images, desc="Processing images"):
+		rel_path = image_path.relative_to(input_dir)
+		out_path = annotated_root / rel_path
+		out_path.parent.mkdir(parents=True, exist_ok=True)
 
-	# Read Video Clip
-	cap = cv2.VideoCapture(video_file)
-	ret, frame = cap.read()
-	img_h, img_w, _ = frame.shape  # retrieve video height and width
-	fps = int(round(cap.get(cv2.CAP_PROP_FPS)))
-	frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-	
-	# Initialize ffmpeg writer
-	command = f"ffmpeg -loglevel error -y -s {img_w}x{img_h} -pixel_format rgb24 -f rawvideo -r {fps} -i pipe: -vcodec libx264 -pix_fmt yuv420p -crf 24 {output_file}"
-	command = shlex.split(command)
-	process = sp.Popen(command, stdin=sp.PIPE)
-	
-	# Iterate over frames and process
-	frame_nb = 0
-	with tqdm(total=frame_count) as pbar:
-		while ret:
-			frame_nb += 1
-			
-			# =============== Predict =============== #
-			frame_np = frame[..., ::-1] # BGR >> RGB
-			frame = Image.fromarray(frame_np)
-			output = predict_gaze(frame, sharingan, head_detector, tracker=tracker)
-			gaze_points, gaze_vecs, inouts, head_bboxes, gaze_heatmaps, pids = output
+		image = Image.open(image_path).convert("RGB")
+		image_np = np.array(image)
 
-			# =============== Draw Prediction =============== #
-			heatmap_pid = args.heatmap_pid if args.heatmap_pid >= 0 else None
-			num_people = len(head_bboxes)
-			pids = np.arange(num_people) if len(pids) == 0 else pids
-			frame = draw_gaze(frame_np, 
-							head_bboxes = head_bboxes, 
-							gaze_points = gaze_points, 
-							gaze_vecs = gaze_vecs if args.show_gaze_vec else None, 
-							inouts = inouts, 
-							pids = pids, 
-							gaze_heatmaps = gaze_heatmaps, 
-							heatmap_pid = heatmap_pid, 
-							frame_nb = None, 
-							colors = COLORS,
-							filter_by_inout = args.filter_by_inout,
-							alpha = 0.6, 
-							gaze_pt_size = 20,
-							gaze_vec_factor = 0.6,
-							head_center_size = 18,
-							thickness = 10,
-							fs = 0.8,
-							) 
+		# =============== Predict =============== #
+		output = predict_gaze(image, sharingan, head_detector, tracker=tracker, frame_path=str(image_path))
+		gaze_points, gaze_vecs, inouts, head_bboxes, gaze_heatmaps, pids = output
 
+		# =============== Draw Prediction =============== #
+		heatmap_pid = args.heatmap_pid if args.heatmap_pid >= 0 else None
+		num_people = len(head_bboxes)
+		pids = np.arange(num_people) if len(pids) == 0 else pids
+		annotated = draw_gaze(image_np,
+							 head_bboxes = head_bboxes,
+							 gaze_points = gaze_points,
+							 gaze_vecs = gaze_vecs if args.show_gaze_vec else None,
+							 inouts = inouts,
+							 pids = pids,
+							 gaze_heatmaps = gaze_heatmaps,
+							 heatmap_pid = heatmap_pid,
+							 frame_nb = None,
+							 colors = COLORS,
+							 filter_by_inout = args.filter_by_inout,
+							 alpha = 0.6,
+							 gaze_pt_size = 20,
+							 gaze_vec_factor = 0.6,
+							 head_center_size = 18,
+							 thickness = 10,
+							 fs = 0.8,
+							)
 
-			#frame = draw_gaze(frame, 
-			#        		head_bboxes = head_bboxes, gaze_heatmaps = gaze_heatmaps, heatmap_pid = heatmap_pid, 
-			#				  gaze_points = gaze_points, gaze_vecs = gaze_vecs[:, :2], inouts = inouts, pids = pids, 
-			#				  frame_nb = frame_nb, alpha = 0.6, fs = 0.8)
-
-			# ================= Write Frame ================= #
-			process.stdin.write(frame.tobytes())
-
-			# =============== Read Next Frame =============== #
-			ret, frame = cap.read()
-
-			pbar.update(1)
-	
-	# Release Capture Device
-	cap.release()
-	
-	# Close and flush stdin
-	process.stdin.close()
-	
-	# Wait for sub-process to finish
-	process.wait()
-	
-	# Terminate the sub-process
-	process.terminate()
+		Image.fromarray(annotated).save(out_path)
 	
 	end = dt.datetime.now()
-	print(colored(f"Finished. The script took {end - start}.", TERM_COLOR))
+	print(colored(f"Finished. The script took {end - start}. Annotated images saved in: {annotated_root}", TERM_COLOR))
 		
 
 if __name__ == "__main__":
