@@ -32,7 +32,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 import wandb
 from src.losses import compute_sharingan_loss
-from src.metrics import AUC, Distance, GFTestAUC, GFTestDistance
+from src.metrics import AUC, Distance, PLAH, GFTestAUC, GFTestDistance, GFTestPLAH
 from src.utils.common import build_2d_sincos_posemb, pair, spatial_argmax2d
 
 TERM_COLOR = "cyan"
@@ -87,10 +87,12 @@ class SharinganModule(pl.LightningModule):
             {
                 "val_dist": Distance(),
                 "val_auc": AUC(),
+                "val_plah": PLAH(),
                 "val_ap": tm.AveragePrecision(task="binary"),
                 "test_ap": tm.AveragePrecision(task="binary"),
                 "test_auc": GFTestAUC() if self.dataset == "gazefollow" else AUC(),
-                "test_dist": GFTestDistance() if self.dataset == "gazefollow" else Distance()
+                "test_dist": GFTestDistance() if self.dataset == "gazefollow" else Distance(),
+                "test_plah": GFTestPLAH() if self.dataset == "gazefollow" else PLAH(),
             }
         )
 
@@ -276,12 +278,14 @@ class SharinganModule(pl.LightningModule):
             else:
                 wandb.define_metric("metric/test/dist", summary="min")
                 wandb.define_metric("metric/test/ap", summary="max")
+            wandb.define_metric("metric/test/plah", summary="max")
             wandb.define_metric("metric/test/auc", summary="max")
 
             wandb.define_metric("loss/val", summary="min")
             wandb.define_metric("metric/val/dist", summary="min")
             wandb.define_metric("metric/val/auc", summary="max")
             wandb.define_metric("metric/val/ap", summary="max")
+            wandb.define_metric("metric/val/plah", summary="max")
 
             wandb.define_metric("loss/train_epoch", summary="min")
 
@@ -347,6 +351,7 @@ class SharinganModule(pl.LightningModule):
         self.metrics["val_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
         self.metrics["val_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
         self.metrics["val_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
+        self.metrics["val_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
 
         # Logging losses
         self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
@@ -358,6 +363,7 @@ class SharinganModule(pl.LightningModule):
         self.log("metric/val/auc", self.metrics["val_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/dist", self.metrics["val_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/ap", self.metrics["val_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("metric/val/plah", self.metrics["val_plah"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
     def test_step(self, batch, batch_idx):
         n = len(batch["image"])
@@ -374,21 +380,25 @@ class SharinganModule(pl.LightningModule):
         if self.dataset == "gazefollow":
             # Update metrics
             self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_pt"])
+            self.metrics["test_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
             test_dist_to_avg, test_avg_dist, test_min_dist = self.metrics["test_dist"](gaze_pt_pred, batch["gaze_pt"])
 
             # Log metrics
             self.log("metric/test/auc", self.metrics["test_auc"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/plah", self.metrics["test_plah"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/dist_to_avg", test_dist_to_avg, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/avg_dist", test_avg_dist, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/min_dist", test_min_dist, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
         else:
             # Update metrics
             self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
+            self.metrics["test_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
             self.metrics["test_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
             self.metrics["test_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
 
             # Log metrics
             self.log("metric/test/auc", self.metrics["test_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/plah", self.metrics["test_plah"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/dist", self.metrics["test_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/ap", self.metrics["test_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
