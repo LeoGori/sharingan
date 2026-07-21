@@ -4,7 +4,7 @@
 
 
 project:
-    name: sharingan # name of the wandb project
+    name: sharingan_vat # name of the wandb project
     version: 1.0.0
     description: Sharingan - Transformer architecture for multi-person gaze following.
 
@@ -32,8 +32,8 @@ data:
         root_heads: </path/to>/GazeFollow-head
         num_train_samples: 108955
     vat:
-        root: </path/to>/VideoAttentionTarget
-        root_heads: </path/to>/VideoAttentionTarget-head/images
+        root: /home/icub/lgori/sharingan/data/videoattentiontarget
+        root_heads: /home/icub/lgori/sharingan/data/VideoAttentionTarget-head/images
         num_train_samples: 125837
     cp:
         root: </path/to>/ChildPlay
@@ -62,9 +62,9 @@ model:
         decoder_hidden_dims: [48, 96, 192, 384]
         decoder_use_bn: True
     pretraining:
-        gaze360: </path/to>/sharingan/weights/gaze360_resnet18.pt
-        multivit: /</path/to>/sharingan/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
-    weights: /</path/to>/sharingan/checkpoints/gazefollow.pt # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
+        gaze360: /home/icub/lgori/sharingan/weights/gaze360_resnet18.pt
+        multivit: /home/icub/lgori/sharingan/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
+    weights: /home/icub/lgori/sharingan/checkpoints/gf-eyes.ckpt # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
@@ -98,7 +98,7 @@ train:
     matmul_precision: highest # highest (default), high, medium
     precision: 32 # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
     epochs: 2
-    batch_size: 48
+    batch_size: 8
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
     resume: False
