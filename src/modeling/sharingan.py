@@ -32,17 +32,10 @@ from transformers import get_cosine_schedule_with_warmup
 
 import wandb
 from src.losses import compute_sharingan_loss
-from src.metrics import AUC, Distance, GFTestAUC, GFTestDistance
+from src.metrics import AUC, Distance, PLAH, GFTestAUC, GFTestDistance, GFTestPLAH
 from src.utils.common import build_2d_sincos_posemb, pair, spatial_argmax2d
 
 TERM_COLOR = "cyan"
-
-def check_tensor(name, x):
-    if not torch.isfinite(x).all():
-        print(f"[NaN/Inf] {name}")
-        print(f"  min={x.nan_to_num().min()}")
-        print(f"  max={x.nan_to_num().max()}")
-        raise RuntimeError(f"{name} contains NaN/Inf")
 
 
 # ==================================================================================================================
@@ -96,10 +89,12 @@ class SharinganModule(pl.LightningModule):
             {
                 "val_dist": Distance(),
                 "val_auc": AUC(),
+                "val_plah": PLAH(),
                 "val_ap": tm.AveragePrecision(task="binary"),
                 "test_ap": tm.AveragePrecision(task="binary"),
                 "test_auc": GFTestAUC() if self.dataset == "gazefollow" else AUC(),
-                "test_dist": GFTestDistance() if self.dataset == "gazefollow" else Distance()
+                "test_dist": GFTestDistance() if self.dataset == "gazefollow" else Distance(),
+                "test_plah": GFTestPLAH() if self.dataset == "gazefollow" else PLAH(),
             }
         )
 
@@ -285,12 +280,14 @@ class SharinganModule(pl.LightningModule):
             else:
                 wandb.define_metric("metric/test/dist", summary="min")
                 wandb.define_metric("metric/test/ap", summary="max")
+            wandb.define_metric("metric/test/plah", summary="max")
             wandb.define_metric("metric/test/auc", summary="max")
 
             wandb.define_metric("loss/val", summary="min")
             wandb.define_metric("metric/val/dist", summary="min")
             wandb.define_metric("metric/val/auc", summary="max")
             wandb.define_metric("metric/val/ap", summary="max")
+            wandb.define_metric("metric/val/plah", summary="max")
 
             wandb.define_metric("loss/train_epoch", summary="min")
 
@@ -323,32 +320,10 @@ class SharinganModule(pl.LightningModule):
         inout_pred = inout_pred[:, -1, :].squeeze(1)  # (b, n, 1) >> (b, 1) >> (b,)
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
-        
-        # for name, t in {
-        #     "gaze_heatmap_pred during training step": gaze_heatmap_pred,
-        #     "inout_pred during training step": inout_pred,
-        #     "gaze_vec_pred during training step": gaze_vec_pred,
-        #     "gaze_pt_pred during training step": gaze_pt_pred,
-        # }.items():
-        #     print(
-        #         name,
-        #         torch.isfinite(t).all().item(),
-        #         t.min().item(),
-        #         t.max().item(),
-        #     )
-
-        # if not torch.isfinite(gaze_heatmap_pred).all():
-        #     print("NaNs already present in heatmap prediction during training step.")
-        #     raise RuntimeError
 
         # Compute loss
         loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
                                        gaze_vec_pred, gaze_heatmap_pred, inout_pred)
-        
-        # if not torch.isfinite(loss):
-        #     print("LOSS BECAME NON-FINITE")
-        #     print(logs)
-        #     raise RuntimeError("Non-finite loss")
 
         # Logging losses
         self.log("loss/train/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
@@ -370,21 +345,6 @@ class SharinganModule(pl.LightningModule):
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
 
-        # for name, t in {
-        #     "gaze_heatmap_pred during validation step": gaze_heatmap_pred,
-        #     "inout_pred during validation step": inout_pred
-        # }.items():
-        #     print(
-        #         name,
-        #         torch.isfinite(t).all().item(),
-        #         t.min().item(),
-        #         t.max().item(),
-        #     )
-
-        # if not torch.isfinite(gaze_heatmap_pred).all():
-        #     print("NaNs already present in heatmap prediction during validation step")
-        #     raise RuntimeError
-
         # Compute loss
         loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
                                        gaze_vec_pred, gaze_heatmap_pred, inout_pred)
@@ -393,6 +353,7 @@ class SharinganModule(pl.LightningModule):
         self.metrics["val_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
         self.metrics["val_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
         self.metrics["val_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
+        self.metrics["val_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
 
         # Logging losses
         self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
@@ -404,6 +365,7 @@ class SharinganModule(pl.LightningModule):
         self.log("metric/val/auc", self.metrics["val_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/dist", self.metrics["val_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/ap", self.metrics["val_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("metric/val/plah", self.metrics["val_plah"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
     def test_step(self, batch, batch_idx):
         n = len(batch["image"])
@@ -420,25 +382,27 @@ class SharinganModule(pl.LightningModule):
         if self.dataset == "gazefollow":
             # Update metrics
             self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_pt"])
+            self.metrics["test_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
             test_dist_to_avg, test_avg_dist, test_min_dist = self.metrics["test_dist"](gaze_pt_pred, batch["gaze_pt"])
 
             # Log metrics
             self.log("metric/test/auc", self.metrics["test_auc"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/plah", self.metrics["test_plah"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/dist_to_avg", test_dist_to_avg, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/avg_dist", test_avg_dist, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/min_dist", test_min_dist, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
         else:
             # Update metrics
             self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
+            self.metrics["test_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
             self.metrics["test_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
             self.metrics["test_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
 
             # Log metrics
             self.log("metric/test/auc", self.metrics["test_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/plah", self.metrics["test_plah"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/dist", self.metrics["test_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/ap", self.metrics["test_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
-
-        # print(batch["path"])
 
         # Build output dict
         step_output = {
@@ -482,8 +446,8 @@ class SharinganModule(pl.LightningModule):
                     "gp_pred_x": gp_pred_x,
                     "gp_pred_y": gp_pred_y,
                     "inout_pred": inout_pred,
-                    "gp_gt_x": gp_gt_x,
-                    "gp_gt_y": gp_gt_y,
+                    "gp_gt_x": gp_gt_x.mean(),
+                    "gp_gt_y": gp_gt_y.mean(),
                     "inout_gt": inout_gt,
                     "pid": pid,
                     "path": path,
@@ -587,48 +551,26 @@ class Sharingan(nn.Module):
         b, c, h, w = x["image"].shape
         _, n, _, _, _ = x["heads"].shape  # n = total nb of people
 
-        # print(x['heads'])
-        # print('-' * 50)
-        # print(x['head_bboxes'])
-
-        # if len(x['path']) > 1:
-        #     if x['path'][1] == '/home/icub/code/Synch-Heal/data-collection/framesLeo/task1/cond4/can/2026-06-12_11-27-59/sn-939622072593/color/color_00331.png':
-        #         print("Debugging: Found the specific path in the batch.")
         # Encode Gaze Tokens ===================================================
         gaze_tokens, gaze_vec = self.gaze_encoder(x["heads"], x["head_bboxes"])  # (b, n, d), (b, n, 2)
 
-        # check_tensor("gaze_tokens", gaze_tokens)
-        # check_tensor("gaze_vec", gaze_vec)
-
         # Tokenize Inputs ===================================================
         image_tokens = self.image_tokenizer(x["image"])  # (b, t, d) / t = num_tokens, d = token_dim
-        # check_tensor("image_tokens", image_tokens)
-
-
         input_tokens = torch.cat([image_tokens, gaze_tokens], dim=1)  # (b, t+n, d)
-
-        # check_tensor("input_tokens", input_tokens)
-
         t = image_tokens.shape[1]
 
         # Encode Tokens =====================================================
         output_tokens = self.encoder(input_tokens, return_all_layers=True)  # (b, t+n+g, d) / +g for global tokens / for DPT
-        # for i, layer in enumerate(output_tokens):
-            # check_tensor(f"encoder_layer_{i}", layer)
-
-
         # Keep only gaze tokens (discard image tokens)
         output_gaze_tokens = output_tokens[-1][:, t : t + n, :].reshape(b * n, -1)
 
         # Decode Heatmap =====================================================
         hm_decoder_input = {"input": output_tokens, "image_size": (h, w), "num_people": n}
         gaze_hm = self.heatmap_decoder(hm_decoder_input)  # for Conditional DPT
-        # check_tensor("gaze_hm", gaze_hm)
 
         # Decode InOut ====================================================
         inout_decoder_input = torch.cat([output_gaze_tokens, gaze_tokens.view(b * n, -1)], dim=1)  # (b*n, 2*d)
         inout = self.inout_decoder(inout_decoder_input)  # (b*n, 1)
-        # check_tensor("inout", inout)
         inout = inout.view(b, n, -1)  # (b, n, 1)
 
         return gaze_vec, gaze_hm, inout
@@ -951,15 +893,8 @@ class GazeEncoder(nn.Module):
         b, n, p = head_bbox.shape
         b, n, c, h, w = head.shape
 
-        # print(f"Pos Proj weights: {self.pos_proj.weight}")
-
         head_bbox_emb = self.pos_proj(head_bbox.view(-1, p))  # (b*n, token_dim)
-
-        # print(f"Backbone weights: {self.backbone[0].weight}")
-
         gaze_emb = self.backbone(head.view(-1, c, h, w)).flatten(1, -1) # (b*n, embed_dim)
-
-        # print(f"Gaze proj weights: {self.gaze_proj[0].weight}")
 
         gaze_token = self.gaze_proj(gaze_emb) + head_bbox_emb  # (b*n, token_dim)
         gaze_token = gaze_token.view(b, n, -1) # (b, n, token_dim)

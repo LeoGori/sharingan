@@ -256,6 +256,44 @@ class Experiment(BaseExperiment):
         print(colored(f"Testing model from: `{ckpt_path}`.", TERM_COLOR))
         self.trainer.test(self.model, self.data, ckpt_path=ckpt_path, verbose=True)
 
+    def _eye_usage_stats(self, dataset):
+        if dataset is None:
+            return None
+
+        if hasattr(dataset, "get_eye_usage_stats"):
+            return dataset.get_eye_usage_stats()
+
+        used_eyes_set = getattr(dataset, "used_eyes_set", None)
+        available_data_set = getattr(dataset, "available_data_set", None)
+        if (used_eyes_set is not None) and (available_data_set is not None):
+            return len(used_eyes_set), len(available_data_set)
+
+        return None
+
+    def _print_eye_usage_summary(self):
+        for split in ("train", "val", "test"):
+            dataset = getattr(self.data, f"{split}_dataset", None)
+            stats = self._eye_usage_stats(dataset)
+            if stats is None:
+                continue
+
+            used, available = stats
+            if available == 0:
+                print(
+                    colored(
+                        f"{split.title()} Set used eyes over 0 samples: 0 (n/a)",
+                        TERM_COLOR,
+                    )
+                )
+                continue
+
+            print(
+                colored(
+                    f"{split.title()} Set used eyes over {available} samples: {used} ({used / available * 100:.2f}%)",
+                    TERM_COLOR,
+                )
+            )
+
     def run(self):
         print(colored("Starting the experiment ...", TERM_COLOR))
         start = dt.datetime.now()
@@ -273,3 +311,8 @@ class Experiment(BaseExperiment):
 
         end = dt.datetime.now()
         print(colored(f"Finished. The experiment took {end - start}.", TERM_COLOR))
+
+        # print(colored(f"Train Set used eyes over {len(self.data.train_dataset.available_data_set)} images: {len(self.data.train_dataset.used_eyes_set)} ({len(self.data.train_dataset.used_eyes_set) / len(self.data.train_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        # print(colored(f"Val Set used eyes over {len(self.data.val_dataset.available_data_set)} images: {len(self.data.val_dataset.used_eyes_set)} ({len(self.data.val_dataset.used_eyes_set) / len(self.data.val_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        # print(colored(f"Test Set used eyes over {len(self.data.test_dataset.available_data_set)} images: {len(self.data.test_dataset.used_eyes_set)} ({len(self.data.test_dataset.used_eyes_set) / len(self.data.test_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        self._print_eye_usage_summary()

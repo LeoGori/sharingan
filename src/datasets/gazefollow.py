@@ -73,6 +73,9 @@ class GazeFollowDataset(Dataset):
         self.return_head_mask = return_head_mask
         self.annotations = self.load_annotations()
 
+        self.used_eyes_set = set()
+        self.available_data_set = set()
+
     def load_annotations(self) -> pd.DataFrame:
         annotations = pd.DataFrame()
         if self.split == "test":
@@ -115,6 +118,26 @@ class GazeFollowDataset(Dataset):
         annotations = annotations[annotations.bbox_y_min < annotations.bbox_y_max]
         return annotations.reset_index(drop=True)
 
+    def get_eye_usage_stats(self):
+        available_data_set = set()
+        used_eyes_set = set()
+
+        for _, item in self.annotations.iterrows():
+            path = item["path"]
+            split, partition, img_name = path.split("/")
+            basename, _ = os.path.splitext(img_name)
+            available_data_set.add(basename)
+
+            if (self.num_people == -1) or (self.num_people > 1):
+                eyes_det_file = f"gt/{split}/{partition}/annotated/{basename}-eyes-detections.npy"
+                eyes_det_path = os.path.join(self.root, eyes_det_file)
+                if os.path.exists(eyes_det_path):
+                    eyes_detections = np.load(eyes_det_path)
+                    if len(eyes_detections) > 0 and eyes_detections[0, -1] >= self.head_thr:
+                        used_eyes_set.add(basename)
+
+        return len(used_eyes_set), len(available_data_set)
+
     def __getitem__(self, index: int) -> Dict:
         if self.split in ["train", "val"]:
             item = self.annotations.iloc[index]
@@ -153,6 +176,8 @@ class GazeFollowDataset(Dataset):
         context_eyes_bboxes = torch.zeros((0, 4))
         eyes_detections = None
         eyes_ok = False
+        self.available_data_set.add(basename)
+
         if (self.num_people == -1) or (self.num_people > 1):
             eyes_det_file = f"gt/{split}/{partition}/annotated/{basename}-eyes-detections.npy"
             # check if eyes detections file exists
@@ -160,9 +185,11 @@ class GazeFollowDataset(Dataset):
 
                 eyes_detections = np.load(os.path.join(self.root, eyes_det_file))
 
-                if len(eyes_detections) > 0:
-
+                target_eyes_confidence = eyes_detections[0, -1]
+                if target_eyes_confidence >= self.head_thr:
+                        
                     eyes_ok = True
+                    self.used_eyes_set.add(basename)
 
                     # extract the target person's eyes bbox (the first one in the list) and remove it from the context eyes bboxes
                     target_eyes_bbox = torch.tensor(eyes_detections[0, :-1]).unsqueeze(0)
@@ -185,12 +212,13 @@ class GazeFollowDataset(Dataset):
                     context_eyes_bboxes = context_eyes_bboxes[:num_keep]
 
         if inout == 0:
-            if eyes_ok:
-                # make the gaze point the center of the eyes from the target eyes bbox
-                gaze_pt = torch.tensor([(target_eyes_bbox[0, 0] + target_eyes_bbox[0, 2]) / 2, (target_eyes_bbox[0, 1] + target_eyes_bbox[0, 3]) / 2], dtype=torch.float)
-            else:
-                # make the gaze point the center of the head from the target head bbox
-                gaze_pt = torch.tensor([(target_head_bbox[0, 0] + target_head_bbox[0, 2]) / 2, (target_head_bbox[0, 1] + target_head_bbox[0, 3]) / 2], dtype=torch.float)
+            gaze_pt = torch.tensor([-1.0, -1.0], dtype=torch.float)
+            # if eyes_ok:
+            #     # make the gaze point the center of the eyes from the target eyes bbox
+            #     gaze_pt = torch.tensor([(target_eyes_bbox[0, 0] + target_eyes_bbox[0, 2]) / 2, (target_eyes_bbox[0, 1] + target_eyes_bbox[0, 3]) / 2], dtype=torch.float)
+            # else:
+            #     # make the gaze point the center of the head from the target head bbox
+            #     gaze_pt = torch.tensor([(target_head_bbox[0, 0] + target_head_bbox[0, 2]) / 2, (target_head_bbox[0, 1] + target_head_bbox[0, 3]) / 2], dtype=torch.float)
                 
 
         ## For context people (ie. detected w/ Yolo)

@@ -123,6 +123,9 @@ class VideoAttentionTargetDataset(Dataset):
 		self.head_thr = head_thr
 		self.return_head_mask = return_head_mask
 		self.annotations = self.load_annotations()
+
+		self.used_eyes_set = set()
+		self.available_data_set = set()
   
 	def load_annotations(self):
 		annotation_files = glob(os.path.join(self.root, f"annotations/*/*/*/*.txt"))
@@ -158,6 +161,29 @@ class VideoAttentionTargetDataset(Dataset):
 
 		return annotations
 
+	def get_eye_usage_stats(self):
+		available_data_set = set()
+		used_eyes_set = set()
+
+		for _, item in self.annotations.iterrows():
+			show, clip, img_name = item["path"].split("/")
+			basename, _ = os.path.splitext(img_name)
+			available_data_set.add(basename)
+
+			if (self.num_people == -1) or (self.num_people > 1):
+				if item["id"] < 10:
+					eyes_det_file = f"gt/images/{show}/{clip}/annotated/{basename}-eyes-detections_s0{item['id']}.npy"
+				else:
+					eyes_det_file = f"gt/images/{show}/{clip}/annotated/{basename}-eyes-detections_s{item['id']}.npy"
+
+				eyes_det_path = os.path.join(self.root, eyes_det_file)
+				if os.path.exists(eyes_det_path):
+					eyes_detections = np.load(eyes_det_path)
+					if len(eyes_detections) > 0 and eyes_detections[0, -1] >= self.head_thr:
+						used_eyes_set.add(basename)
+
+		return len(used_eyes_set), len(available_data_set)
+
 	def __getitem__(self, index: int) -> Dict:
 		item = self.annotations.iloc[index]
 		show, clip, img_name = item["path"].split("/")
@@ -188,6 +214,8 @@ class VideoAttentionTargetDataset(Dataset):
 		context_eyes_bboxes = torch.zeros((0, 4))
 		eyes_detections = None
 		eyes_ok = False
+		self.available_data_set.add(basename)
+
 		if (self.num_people == -1) or (self.num_people > 1):
 			if item['id'] < 10:
 				eyes_det_file = f"gt/images/{show}/{clip}/annotated/{basename}-eyes-detections_s0{item['id']}.npy"
@@ -196,8 +224,11 @@ class VideoAttentionTargetDataset(Dataset):
             # check if eyes detections file exists 
 			if os.path.exists(os.path.join(self.root, eyes_det_file)):
 				eyes_detections = np.load(os.path.join(self.root, eyes_det_file))
-				if len(eyes_detections) > 0:
+
+				target_eyes_confidence = eyes_detections[0, -1]
+				if target_eyes_confidence >= self.head_thr:
 					eyes_ok = True
+					self.used_eyes_set.add(basename)
 
                     # extract the target person's eyes bbox (the first one in the list) and remove it from the context eyes bboxes
 					target_eyes_bbox = torch.tensor(eyes_detections[0, :-1]).unsqueeze(0)
