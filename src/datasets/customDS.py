@@ -50,7 +50,7 @@ class CustomDataset(Dataset):
         heatmap_sigma: int = 3,
         heatmap_size: int = 64,
         num_people: int = 1,
-        head_thr: float = 0.5,
+        head_thr: float = 1,
         return_head_mask: bool = False,
     ):
         super().__init__()
@@ -71,10 +71,13 @@ class CustomDataset(Dataset):
         self.return_head_mask = return_head_mask
         self.annotations = self.load_annotations()
 
+        self.used_eyes_set = set()
+        self.available_data_set = set()
+
     def load_annotations(self) -> pd.DataFrame:
         annotations = pd.DataFrame()
-        column_names = ["path", "id", "gaze_x", "gaze_y", "eye_bbox_x_min", "eye_bbox_y_min", "eye_bbox_x_max", "eye_bbox_y_max", 
-                            "bbox_x_min", "bbox_y_min", "bbox_x_max", "bbox_y_max", "inout"]
+        column_names = ["path", "id", "gaze_x", "gaze_y", "eye_bbox_x_min", "eye_bbox_y_min", "eye_bbox_x_max", "eye_bbox_y_max", "eyes_det_conf",
+                            "bbox_x_min", "bbox_y_min", "bbox_x_max", "bbox_y_max", "head_det_conf", "inout"]
         if self.split == "test":
 
             annotations = pd.read_csv(
@@ -115,19 +118,41 @@ class CustomDataset(Dataset):
         annotations = annotations[annotations.bbox_y_min < annotations.bbox_y_max]
         return annotations.reset_index(drop=True)
 
+    # def get_eye_usage_stats(self):
+        # available_data_set = set()
+        # used_eyes_set = set()
+
+        # for _, item in self.annotations.iterrows():
+        #     path = item["path"]
+        #     split, partition, img_name = path.split("/")
+        #     basename, _ = os.path.splitext(img_name)
+        #     available_data_set.add(basename)
+
+        #     if (self.num_people == -1) or (self.num_people > 1):
+        #         eyes_det_file = f"gt/{split}/{partition}/annotated/{basename}-eyes-detections.npy"
+        #         eyes_det_path = os.path.join(self.root, eyes_det_file)
+        #         if os.path.exists(eyes_det_path):
+        #             eyes_detections = np.load(eyes_det_path)
+        #             if len(eyes_detections) > 0 and eyes_detections[0, -1] >= self.head_thr:
+                        # used_eyes_set.add(basename)
+
+        # return len(self.used_eyes_set), len(self.available_data_set)
+
     def __getitem__(self, index: int) -> Dict:
         if self.split in ["train", "val"]:
             item = self.annotations.iloc[index]
             gaze_pt = torch.tensor([item["gaze_x"], item["gaze_y"]], dtype=torch.float)
             # normalize gaze point to [0, 1] range
-            gaze_pt /= torch.tensor(get_img_size(Image.open(os.path.join(item["path"]))), dtype=torch.float)
+            if (gaze_pt != -1).all():
+                gaze_pt /= torch.tensor(get_img_size(Image.open(os.path.join(item["path"]))), dtype=torch.float)
             idx = item["id"]
         elif self.split == "test":
             image_path = self.image_paths[index]
             p_annotations = self.annotations[self.annotations.path == image_path]
             gaze_pt = torch.from_numpy(p_annotations[["gaze_x", "gaze_y"]].values).float()
             # normalize gaze point to [0, 1] range
-            gaze_pt /= torch.tensor(get_img_size(Image.open(os.path.join(p_annotations.iloc[0]["path"]))), dtype=torch.float)
+            if (gaze_pt != -1).all():
+                gaze_pt /= torch.tensor(get_img_size(Image.open(os.path.join(p_annotations.iloc[0]["path"]))), dtype=torch.float)
             # p = 20 - len(gaze_pt)
             # Pad to have same length across samples for dataloader
             # gaze_pt = F.pad(gaze_pt, (0, 0, 0, p), value=-1.0)
@@ -151,13 +176,16 @@ class CustomDataset(Dataset):
         image = Image.open(os.path.join(item["path"])).convert("RGB")
         img_w, img_h = image.size
 
-        # if path == '/home/icub/code/Synch-Heal/data-collection/framesLeo/task5/cond1/mg/2026-06-12_11-07-51/sn-939622072593/color/color_00006.png':
-        #     print("Debugging: Found the specific path in the dataset.")
+        # if "/cond1/out/2026-06-18_12-12-01/sn-939622072593/color/color_00159.png" in path:
+            #  print("Debugging: Found the specific path in the dataset.")
+
+        self.available_data_set.add(path)
 
         # load eyes bboxes (only for target person, not context people)
         eyes_bbox = item[["eye_bbox_x_min", "eye_bbox_y_min", "eye_bbox_x_max", "eye_bbox_y_max"]]
         eyes_bbox = torch.from_numpy(eyes_bbox.values.astype(np.float32)).unsqueeze(0)
         eyes_bbox = expand_bbox(eyes_bbox, img_w, img_h, k=0.2) # annotated boxes are a bit tight 
+        eyes_det_conf = item["eyes_det_conf"]
         # target_eyes_center = torch.stack([eyes_bbox[0, [0, 2]].mean(), eyes_bbox[0, [1, 3]].mean()])
         # target_eyes_center /= torch.tensor([img_w, img_h], dtype=torch.float)
 
@@ -167,15 +195,17 @@ class CustomDataset(Dataset):
         target_head_bbox = item[["bbox_x_min", "bbox_y_min", "bbox_x_max", "bbox_y_max"]]
         target_head_bbox = torch.from_numpy(target_head_bbox.values.astype(np.float32)).unsqueeze(0)
         target_head_bbox = expand_bbox(target_head_bbox, img_w, img_h, k=0.1) # annotated boxes are a bit tight
+        target_head_det_conf = item["head_det_conf"]
         # target_head_center =  torch.stack([target_head_bbox[0, [0, 2]].mean(), target_head_bbox[0, [1, 3]].mean()])
         # target_head_center /= torch.tensor([img_w, img_h], dtype=torch.float)
 
         # select head bboxes as the input if eyes bboxes are nan
-        if eyes_bbox.isnan().any():
+        if eyes_bbox.isnan().any() or (eyes_det_conf < self.head_thr):
             input_bboxes = target_head_bbox
             # input_centers = target_head_center
         else:
             input_bboxes = eyes_bbox
+            self.used_eyes_set.add(path)
             # input_centers = target_eyes_center
 
         ## For context people (ie. detected w/ Yolo)
@@ -258,7 +288,8 @@ class CustomDataset(Dataset):
         )
         
         # Generate gaze heatmap
-        if sample["inout"] == 1.0:
+        # if sample["inout"] == 1.0:
+        if (sample["gaze_pt"] != -1).all():
             sample["gaze_heatmap"] = generate_gaze_heatmap(sample["gaze_pt"], sigma=self.heatmap_sigma, size=self.heatmap_size)    
         else:
             sample["gaze_heatmap"] = torch.zeros((self.heatmap_size, self.heatmap_size), dtype=torch.float)
@@ -398,7 +429,7 @@ class CustomDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size["train"],
             shuffle=True,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader
@@ -408,7 +439,7 @@ class CustomDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size["val"],
             shuffle=False,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader
@@ -418,7 +449,7 @@ class CustomDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size["test"],
             shuffle=False,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader
