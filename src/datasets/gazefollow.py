@@ -51,7 +51,7 @@ class GazeFollowDataset(Dataset):
         heatmap_sigma: int = 3,
         heatmap_size: int = 64,
         num_people: int = 2,
-        head_thr: float = 0.5,
+        head_thr: float = 1,
         return_head_mask: bool = False,
     ):
         super().__init__()
@@ -451,7 +451,7 @@ class GazeFollowDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size["train"],
             shuffle=True,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader
@@ -461,7 +461,7 @@ class GazeFollowDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size["val"],
             shuffle=False,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader
@@ -471,7 +471,7 @@ class GazeFollowDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size["test"],
             shuffle=False,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
         return dataloader

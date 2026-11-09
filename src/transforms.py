@@ -89,8 +89,9 @@ class RandomHorizontalFlip(object):
             # Flip Head Bboxes
             sample["head_bboxes"][:, [0, 2]] = 1.0 - sample["head_bboxes"][:, [2, 0]]
             
-            # Flip Gaze Points
-            if sample["inout"] == 1.:
+            # Flip Gaze Points (based on gaze validity rather than inout, so out-of-frame samples
+            # with a valid gaze point, e.g. mutual gaze, are flipped too)
+            if (sample["gaze_pt"] != -1.0).any():
                 if sample["gaze_pt"].ndim == 2:
                     mask = sample["gaze_pt"][:, 0] != -1.0
                     sample["gaze_pt"][mask, 0] = 1.0 - sample["gaze_pt"][mask, 0]
@@ -223,8 +224,8 @@ class RandomCropSafeGaze(object):
                 sample["inout"] = 1. - sample["inout"]
                 sample["gaze_pt"] = torch.tensor([-1., -1.], dtype=torch.float)
 
-            # Convert Gaze Points
-            if sample["inout"] == 1.:
+            # Convert Gaze Points (based on gaze validity rather than inout, see RandomHorizontalFlip)
+            if (sample["gaze_pt"] != -1.0).any():
                 if sample["gaze_pt"].ndim == 2: # gazefollow test set has multiple annotations
                     mask = sample["gaze_pt"][:, 0] != -1.0
                     sample["gaze_pt"][mask] = sample["gaze_pt"][mask] * torch.tensor([[img_w, img_h]]) - torch.tensor([[crop_xmin, crop_ymin]])

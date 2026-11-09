@@ -17,7 +17,7 @@ cs = ConfigStore.instance()
 cs.store(name="my_config", node=MyConfig)
 
 
-@hydra.main(config_path="src/conf", config_name="config_gf", version_base="1.1")
+@hydra.main(config_path="src/conf", config_name="config_vat", version_base="1.1")
 def main(cfg: MyConfig) -> None:
     experiment = Experiment(cfg)
     experiment.setup()

@@ -4,7 +4,7 @@
 
 
 project:
-    name: sharingan # name of the wandb project
+    name: sharingan_custom_new # name of the wandb project
     version: 1.0.0
     description: Sharingan - Transformer architecture for multi-person gaze following.
 
@@ -42,7 +42,13 @@ data:
     custom:
         root: 
         root_annotations: /home/icub/lgori/sharingan/data/
-        num_train_samples: 16146
+        use_bg_switch: True # background switch augmentation on the train split only (load frames_nobg and paste a background from bg_dir); val always loads the original frames
+        use_bg_switch_test: False # background switch on the test split (frames_nobg + a fixed background per sample, deterministic across runs); False loads the original frames
+        max_transparent_ratio: 0.8 # if the frames_nobg image has more than this fraction of fully transparent pixels (e.g. empty scene), the original frame is used instead
+        bg_dir: /home/icub/lgori/sharingan/bg # backgrounds used to fill transparent pixels of RGBA images
+        debug_bg_every_n: 0 # save the loaded image (with pasted background) every N calls to __getitem__; 0 disables it
+        debug_bg_dir: /home/icub/lgori/sharingan/debug_bg_test1 # where debug images are saved (one subfolder per split)
+        num_train_samples: 23259
 
 
 # ------------------------------------------------------------------------------------------------------------------- #
@@ -68,32 +74,32 @@ model:
     pretraining:
         gaze360: /home/icub/lgori/sharingan/weights/gaze360_resnet18.pt
         multivit: /home/icub/lgori/sharingan/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
-    weights: /home/icub/lgori/sharingan/checkpoints/gazefollow.pt # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
+    weights: /home/icub/lgori/sharingan/checkpoints/videoattentiontarget.pt # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 loss:
     weight_heatmap: 1000
-    weight_angular: 3
+    weight_angular: 0
     weight_bce: 10
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 optimizer:
     lr:
-        base: 0
-        gaze_encoder: 1e-5
+        base: 3e-5
+        gaze_encoder: 0
         image_tokenizer: 0
-        vit_encoder: 1e-5
-        gaze_decoder: 1e-5
-        inout_decoder: 1e-5
+        vit_encoder: 0
+        gaze_decoder: 1e-6
+        inout_decoder: 3e-4
     weight_decay: 1e-3 # /!\
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 scheduler:
-    type: cosine_warmup # cosine_warmup (default), null (no scheduler)
-    warmup_epochs: 4
+    type: null # cosine_warmup (default), null (no scheduler)
+    warmup_epochs: 0
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
@@ -101,23 +107,23 @@ train:
     seed: 5
     matmul_precision: highest # highest (default), high, medium
     precision: 32 # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
-    epochs: 20
+    epochs: 5
     batch_size: 16
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
-    resume: False 
-    resume_from: null 
+    resume: False
+    resume_from: null
     checkpointing:
         monitor: "metric/val/dist" # "metric/val/dist" (default), "metric/val/ap", "loss/val"
         mode: "min" # "min" (default), "max"
     freeze:
-        gaze_encoder: False 
+        gaze_encoder: True
         image_tokenizer: True
-        vit_encoder: False
+        vit_encoder: True
         gaze_decoder: False
         inout_decoder: False
     swa:
-        use: True
+        use: False
         lr: 3e-5
         epoch_start: 11
         annealing_epochs: 8
@@ -150,6 +156,3 @@ hydra:
         dir: ./
     job: 
         chdir: True
-
-
-

@@ -72,7 +72,8 @@ IMG_MEAN = [0.44232, 0.40506, 0.36457]
 IMG_STD = [0.28674, 0.27776, 0.27995]
 
 # CKPT_PATH = "checkpoints/videoattentiontarget.pt"
-CKPT_PATH = "checkpoints/best-v12.ckpt"
+# CKPT_PATH = "checkpoints/best-v12.ckpt"
+CKPT_PATH = "checkpoints/gf+vat+ours-head-bg-swap-mg0.ckpt"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(colored(f"Using device: {DEVICE}", TERM_COLOR))
@@ -272,6 +273,7 @@ def load_sharingan_model(ckpt_path, device):
 	checkpoint = torch.load(ckpt_path, map_location="cpu")
 	checkpoint = {name.replace("model.", ""): value for name, value in checkpoint["state_dict"].items()}
 	sharingan.load_state_dict(checkpoint, strict=True)
+	print(colored(f"Successfully loaded Sharingan weights from {ckpt_path}.", TERM_COLOR))
 	sharingan.eval()
 	sharingan.to(device)
 	return sharingan
@@ -292,8 +294,10 @@ def predict_gaze(image, sharingan, head_detector, tracker=None, frame_path=None)
 			detections.append(detection)
 	detections = np.stack(detections) if len(detections) > 0 else _empty_detections()
 	num_heads = len(detections)
-	
-	# 2. Detect & track head bboxes 
+	if num_heads == 0:  # no head detected above DET_THR in this frame
+		return torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([])
+
+	# 2. Detect & track head bboxes
 	# if detections is just one, do not use tracker
 	if detections.shape[0] == 1:
 		head_bboxes = torch.from_numpy(detections[:, :4]).float()
@@ -541,6 +545,7 @@ def main():
 	sharingan = load_sharingan_model(CKPT_PATH, DEVICE)
 	print(colored(f"Loaded tracker, {head_detector_config.get('type', 'yolo')} head detector, and sharingan models.", TERM_COLOR))
 	# Iterate over images and process
+	num_frames_no_head = 0
 	for image_path in tqdm(images, desc="Processing images"):
 		rel_path = image_path.relative_to(input_dir)
 		out_path = annotated_root / rel_path
@@ -552,6 +557,10 @@ def main():
 		# =============== Predict =============== #
 		output = predict_gaze(image, sharingan, head_detector, tracker=tracker, frame_path=str(image_path))
 		gaze_points, gaze_vecs, inouts, head_bboxes, gaze_heatmaps, pids = output
+		if len(head_bboxes) == 0:  # no head detected: save the frame without annotations
+			num_frames_no_head += 1
+			Image.fromarray(image_np).save(out_path)
+			continue
 
 		# =============== Draw Prediction =============== #
 		heatmap_pid = args.heatmap_pid if args.heatmap_pid >= 0 else None
@@ -579,6 +588,8 @@ def main():
 		Image.fromarray(annotated).save(out_path)
 	
 	end = dt.datetime.now()
+	if num_frames_no_head > 0:
+		print(colored(f"No head detected in {num_frames_no_head}/{len(images)} images (saved without annotations).", TERM_COLOR))
 	print(colored(f"Finished. The script took {end - start}. Annotated images saved in: {annotated_root}", TERM_COLOR))
 		
 

@@ -7,6 +7,7 @@
 #
 
 import os
+import random
 from typing import Dict, Union
 
 import numpy as np
@@ -50,8 +51,13 @@ class CustomDataset(Dataset):
         heatmap_sigma: int = 3,
         heatmap_size: int = 64,
         num_people: int = 1,
-        head_thr: float = 1,
+        head_thr: float = 0.5,
         return_head_mask: bool = False,
+        bg_dir: Union[str, None] = None,
+        use_bg_switch: bool = True,
+        max_transparent_ratio: float = 0.8,
+        debug_bg_every_n: int = 0,
+        debug_bg_dir: Union[str, None] = None,
     ):
         super().__init__()
 
@@ -70,6 +76,18 @@ class CustomDataset(Dataset):
         self.head_thr = head_thr
         self.return_head_mask = return_head_mask
         self.annotations = self.load_annotations()
+        # Background switch augmentation: load the background-free frames and paste a background from `bg_dir`
+        self.use_bg_switch = use_bg_switch
+        self.bg_paths = self._list_backgrounds(bg_dir) if use_bg_switch else []
+        # Fall back to the original frame when the background-free image is mostly transparent (e.g. empty scene)
+        self.max_transparent_ratio = max_transparent_ratio
+
+        # Debug: save the composited image every `debug_bg_every_n` calls to __getitem__ (0 disables it)
+        self.debug_bg_every_n = debug_bg_every_n or 0
+        self.debug_bg_dir = debug_bg_dir
+        self._getitem_count = 0
+        if self.debug_bg_every_n > 0 and self.debug_bg_dir:
+            os.makedirs(os.path.join(self.debug_bg_dir, self.split), exist_ok=True)
 
         self.used_eyes_set = set()
         self.available_data_set = set()
@@ -109,6 +127,53 @@ class CustomDataset(Dataset):
             self.length = len(annotations)
 
         return annotations
+
+    @staticmethod
+    def _list_backgrounds(bg_dir):
+        if bg_dir is None or not os.path.isdir(bg_dir):
+            return []
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+        return sorted(os.path.join(bg_dir, f) for f in os.listdir(bg_dir) if f.lower().endswith(exts))
+
+    def _load_image(self, path: str, index: int, check_transparency: bool = False) -> tuple:
+        """Load an image as RGB. If it has an alpha channel, transparent pixels are
+        filled with a background image picked from `bg_dir`.
+        Returns the image and the path of the background used (None if no background was pasted).
+        If `check_transparency` is True and the fraction of fully transparent pixels exceeds
+        `max_transparent_ratio`, returns (None, None) so that the caller can fall back to the original frame."""
+        image = Image.open(path)
+        has_alpha = image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and "transparency" in image.info)
+        if not has_alpha or len(self.bg_paths) == 0:
+            return image.convert("RGB"), None
+
+        image = image.convert("RGBA")
+        if check_transparency and (np.asarray(image.getchannel("A")) == 0).mean() > self.max_transparent_ratio:
+            return None, None
+        # Random background for training; deterministic (per index) for val/test so metrics are reproducible
+        if self.split == "train":
+            bg_path = random.choice(self.bg_paths)
+        else:
+            bg_path = self.bg_paths[index % len(self.bg_paths)]
+        bg = Image.open(bg_path).convert("RGB")
+        if bg.size != image.size:
+            bg = bg.resize(image.size, Image.BILINEAR)
+        bg.paste(image, (0, 0), mask=image.getchannel("A"))
+        return bg, bg_path
+
+    def _save_debug_image(self, image: Image.Image, src_path: str, bg_path: Union[str, None]):
+        """Save the loaded image to `debug_bg_dir/<split>/` every `debug_bg_every_n` calls to __getitem__."""
+        self._getitem_count += 1
+        if self.debug_bg_every_n <= 0 or not self.debug_bg_dir:
+            return
+        if self._getitem_count % self.debug_bg_every_n != 0:
+            return
+        src_name = os.path.splitext(os.path.basename(src_path))[0]
+        bg_name = os.path.splitext(os.path.basename(bg_path))[0] if bg_path else "nobg"
+        out_name = f"{self._getitem_count:08d}_{src_name}_{bg_name}.png"
+        try:
+            image.save(os.path.join(self.debug_bg_dir, self.split, out_name))
+        except OSError as e:
+            print(f"[CustomDataset] Could not save debug image {out_name}: {e}")
 
     def _clean_annotations(self, annotations):
         # Only keep "in" and "out". (-1 is invalid)
@@ -173,7 +238,23 @@ class CustomDataset(Dataset):
         # print(3, img_name)
         # Load image
         # image = Image.open(os.path.join(self.root, item["path"])).convert("RGB")
-        image = Image.open(os.path.join(item["path"])).convert("RGB")
+        # extract the original path with probability 0.5 to avoid overfitting to the training set
+        split_prob = random.random()
+        if not self.use_bg_switch or (self.split == "train" and split_prob < 1 / (len(self.bg_paths) + 1)):
+            # print("Using original path")
+            image, bg_path = self._load_image(path, index)
+            path_loaded = path
+        else:
+            new_path = path
+            # replace the string frames with frames_nobg in the path to load the image from the new path
+            new_path = new_path.replace("frames", "frames_nobg")
+            image, bg_path = self._load_image(os.path.join(new_path), index, check_transparency=True)
+            path_loaded = new_path
+            if image is None:  # mostly transparent (e.g. no person/table/objects): use the original frame
+                image, bg_path = self._load_image(path, index)
+                path_loaded = path
+
+        self._save_debug_image(image, path_loaded, bg_path)
         img_w, img_h = image.size
 
         # if "/cond1/out/2026-06-18_12-12-01/sn-939622072593/color/color_00159.png" in path:
@@ -259,7 +340,7 @@ class CustomDataset(Dataset):
             "inout": inout,
             "id": idx,
             "img_size": torch.tensor((img_w, img_h), dtype=torch.long),
-            "path": path,
+            "path": path,   
         }
 
         # Transform
@@ -324,9 +405,21 @@ class CustomDataModule(pl.LightningDataModule):
         heatmap_size: Union[int, tuple[int, int]] = 64,
         num_people: dict = {"train": 1, "val": 1, "test": 1},
         return_head_mask: bool = False,
+        bg_dir: Union[str, None] = None,
+        use_bg_switch: bool = True,
+        use_bg_switch_test: bool = False,
+        max_transparent_ratio: float = 0.8,
+        debug_bg_every_n: int = 0,
+        debug_bg_dir: Union[str, None] = None,
     ):
         super().__init__()
         self.root = root
+        self.bg_dir = bg_dir
+        self.use_bg_switch = use_bg_switch
+        self.use_bg_switch_test = use_bg_switch_test
+        self.max_transparent_ratio = max_transparent_ratio
+        self.debug_bg_every_n = debug_bg_every_n
+        self.debug_bg_dir = debug_bg_dir
         self.root_annotations = root_annotations
         self.image_size = pair(image_size)
         self.heatmap_sigma = heatmap_sigma
@@ -363,6 +456,11 @@ class CustomDataModule(pl.LightningDataModule):
                 heatmap_sigma=self.heatmap_sigma,
                 num_people=self.num_people,
                 return_head_mask=self.return_head_mask,
+                bg_dir=self.bg_dir,
+                max_transparent_ratio=self.max_transparent_ratio,
+                use_bg_switch=self.use_bg_switch,
+                debug_bg_every_n=self.debug_bg_every_n,
+                debug_bg_dir=self.debug_bg_dir,
             )
 
             val_transform = Compose(
@@ -382,6 +480,11 @@ class CustomDataModule(pl.LightningDataModule):
                 heatmap_sigma=self.heatmap_sigma,
                 num_people=-1, # always valide with all people in the image
                 return_head_mask=self.return_head_mask,
+                bg_dir=self.bg_dir,
+                max_transparent_ratio=self.max_transparent_ratio,
+                use_bg_switch=False, # background switch only for train
+                debug_bg_every_n=self.debug_bg_every_n,
+                debug_bg_dir=self.debug_bg_dir,
             )
 
         elif stage == "validate":
@@ -402,6 +505,11 @@ class CustomDataModule(pl.LightningDataModule):
                 heatmap_sigma=self.heatmap_sigma,
                 num_people=-1, # always valide with all people in the image
                 return_head_mask=self.return_head_mask,
+                bg_dir=self.bg_dir,
+                max_transparent_ratio=self.max_transparent_ratio,
+                use_bg_switch=False, # background switch only for train
+                debug_bg_every_n=self.debug_bg_every_n,
+                debug_bg_dir=self.debug_bg_dir,
             )
 
         elif stage == "test":
@@ -422,6 +530,11 @@ class CustomDataModule(pl.LightningDataModule):
                 heatmap_sigma=self.heatmap_sigma,
                 num_people=-1, # always test with all people in the image
                 return_head_mask=self.return_head_mask,
+                bg_dir=self.bg_dir,
+                max_transparent_ratio=self.max_transparent_ratio,
+                use_bg_switch=self.use_bg_switch_test, # test: optional, with a fixed background per sample
+                debug_bg_every_n=self.debug_bg_every_n,
+                debug_bg_dir=self.debug_bg_dir,
             )
 
     def train_dataloader(self):

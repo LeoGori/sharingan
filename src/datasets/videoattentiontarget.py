@@ -103,7 +103,7 @@ class VideoAttentionTargetDataset(Dataset):
 		heatmap_sigma: int = 3,
 		heatmap_size: int = 64,
 		num_people: int = 2,
-		head_thr: float = 0.5,
+		head_thr: float = 1.0,
 		return_head_mask: bool = False,
 	):
 		super().__init__()
@@ -365,7 +365,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
 		heatmap_sigma: int = 3,
 		heatmap_size: int = 64,
 		num_people: int = 2,
-		head_thr: float = 0.5,
+		head_thr: float = 1.0,
 		return_head_mask: bool = False,
 		batch_size: Union[int, dict] = 32,
 	):  
@@ -486,7 +486,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
 			self.train_dataset,
 			batch_size=self.batch_size["train"],
 			shuffle=True,
-			num_workers=4,
+			num_workers=19,
 			pin_memory=True,
 		)
 		return dataloader
@@ -496,7 +496,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
 			self.val_dataset,
 			batch_size=self.batch_size["val"],
 			shuffle=False,
-			num_workers=4,
+			num_workers=19,
 			pin_memory=True,
 		)
 		return dataloader
@@ -506,7 +506,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
 			self.test_dataset,
 			batch_size=self.batch_size["test"],
 			shuffle=False,
-			num_workers=4,
+			num_workers=19,
 			pin_memory=True,
 		)
 		return dataloader

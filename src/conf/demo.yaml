@@ -18,8 +18,8 @@ head_detector:
 
     sam:
         model: /home/icub/code/sam3.1/sam3.1_multiplex.pt
-        prompts: [eyes]
-        conf: 0.2
+        prompts: [head]
+        conf: 0.5
         imgsz: 644
         half: True
         device: cuda:0

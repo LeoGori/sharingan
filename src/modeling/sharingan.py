@@ -32,10 +32,35 @@ from transformers import get_cosine_schedule_with_warmup
 
 import wandb
 from src.losses import compute_sharingan_loss
-from src.metrics import AUC, Distance, PLAH, GFTestAUC, GFTestDistance, GFTestPLAH
+from src.metrics import AUC, Distance, PLAH, GFTestAUC, GFTestDistance, GFTestPLAH, MaskedInOutAccuracy
 from src.utils.common import build_2d_sincos_posemb, pair, spatial_argmax2d
 
 TERM_COLOR = "cyan"
+
+# Path patterns of samples labelled out-of-frame for the inout classification, but whose gaze point
+# is still valid and used for the heatmap/angular losses (mutual gaze and task1/cond1)
+GAZE_ONLY_PATTERNS = ("/mg/", "/task1/cond1/")
+
+
+def compute_gz_inout(inout, paths):
+    """Return 1 where inout is 1 or the path matches GAZE_ONLY_PATTERNS, 0 otherwise."""
+    gaze_only = torch.tensor(
+        [any(p in path for p in GAZE_ONLY_PATTERNS) for path in paths],
+        dtype=inout.dtype,
+        device=inout.device,
+    )
+    return torch.maximum(inout, gaze_only)
+
+
+# Groups used to evaluate the in/out classification separately (first matching group wins)
+INOUT_GROUPS = ("gazeonly", "out", "in")  # gazeonly: mg + task1/cond1, out: looking out of frame (not mg), in: the rest
+
+
+def compute_inout_groups(paths, device):
+    """Return a dict {group name: boolean mask over the batch} for the groups in INOUT_GROUPS."""
+    gaze_only = torch.tensor([any(p in path for p in GAZE_ONLY_PATTERNS) for path in paths], dtype=torch.bool, device=device)
+    out = torch.tensor(["out" in path for path in paths], dtype=torch.bool, device=device) & ~gaze_only
+    return {"gazeonly": gaze_only, "out": out, "in": ~gaze_only & ~out}
 
 
 # ==================================================================================================================
@@ -95,6 +120,7 @@ class SharinganModule(pl.LightningModule):
                 "test_auc": GFTestAUC() if self.dataset == "gazefollow" else AUC(),
                 "test_dist": GFTestDistance() if self.dataset == "gazefollow" else Distance(),
                 "test_plah": GFTestPLAH() if self.dataset == "gazefollow" else PLAH(),
+                **{f"{split}_acc_{group}": MaskedInOutAccuracy() for split in ("val", "test") for group in INOUT_GROUPS},
             }
         )
 
@@ -321,13 +347,16 @@ class SharinganModule(pl.LightningModule):
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
 
+        batch["gz_inout"] = compute_gz_inout(batch["inout"], batch["path"])
+        gz_ni = int(batch["gz_inout"].sum().item())
+
         # Compute loss
-        loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
+        loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], batch["gz_inout"],
                                        gaze_vec_pred, gaze_heatmap_pred, inout_pred)
 
         # Logging losses
-        self.log("loss/train/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
-        self.log("loss/train/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
+        self.log("loss/train/heatmap", logs["heatmap_loss"], batch_size=gz_ni, prog_bar=False, on_step=True, on_epoch=True)
+        self.log("loss/train/angular", logs["angular_loss"], batch_size=gz_ni, prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train/bce", logs["bce_loss"], batch_size=n, prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train", logs["total_loss"], batch_size=n, prog_bar=True, on_step=True, on_epoch=True)
 
@@ -345,27 +374,36 @@ class SharinganModule(pl.LightningModule):
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
 
+        batch["gz_inout"] = compute_gz_inout(batch["inout"], batch["path"])
+        gz_ni = int(batch["gz_inout"].sum().item())
+
         # Compute loss
-        loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], 
+        loss, logs = self.compute_loss(batch["gaze_vec"], batch["gaze_heatmap"], batch["inout"], batch["gz_inout"],
                                        gaze_vec_pred, gaze_heatmap_pred, inout_pred)
 
         # Update metrics
-        self.metrics["val_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
-        self.metrics["val_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
+        self.metrics["val_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["gz_inout"])
+        self.metrics["val_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["gz_inout"])
         self.metrics["val_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
         self.metrics["val_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
+        if self.dataset == "custom":
+            for group, mask in compute_inout_groups(batch["path"], inout_pred.device).items():
+                self.metrics[f"val_acc_{group}"].update(inout_pred.sigmoid(), batch["inout"], mask)
 
         # Logging losses
-        self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
-        self.log("loss/val/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
+        self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=gz_ni, prog_bar=False, on_step=False, on_epoch=True)
+        self.log("loss/val/angular", logs["angular_loss"], batch_size=gz_ni, prog_bar=False, on_step=False, on_epoch=True)
         self.log("loss/val/bce", logs["bce_loss"], batch_size=n, prog_bar=False, on_step=False, on_epoch=True)
         self.log("loss/val", logs["total_loss"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
         # Logging metrics
-        self.log("metric/val/auc", self.metrics["val_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("metric/val/dist", self.metrics["val_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("metric/val/auc", self.metrics["val_auc"], batch_size=gz_ni, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("metric/val/dist", self.metrics["val_dist"], batch_size=gz_ni, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/ap", self.metrics["val_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
         self.log("metric/val/plah", self.metrics["val_plah"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+        if self.dataset == "custom":
+            for group in INOUT_GROUPS:
+                self.log(f"metric/val/acc_{group}", self.metrics[f"val_acc_{group}"], prog_bar=False, on_step=False, on_epoch=True)
 
     def test_step(self, batch, batch_idx):
         n = len(batch["image"])
@@ -378,6 +416,9 @@ class SharinganModule(pl.LightningModule):
         inout_pred = inout_pred[:, -1, :].squeeze(1)  # (b, n, 1) >> (b, 1) >> (b,)
         gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_pred, normalize=True)  # (b, 2)
+
+        batch["gz_inout"] = compute_gz_inout(batch["inout"], batch["path"])
+        gz_ni = int(batch["gz_inout"].sum().item())
 
         if self.dataset == "gazefollow":
             # Update metrics
@@ -393,16 +434,22 @@ class SharinganModule(pl.LightningModule):
             self.log("metric/test/min_dist", test_min_dist, batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
         else:
             # Update metrics
-            self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["inout"])
+            self.metrics["test_auc"].update(gaze_heatmap_pred, batch["gaze_heatmap"], batch["gz_inout"])
             self.metrics["test_plah"].update(gaze_pt_pred, batch["gaze_pt"], batch["head_bboxes"], batch["inout"])
-            self.metrics["test_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
+            self.metrics["test_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["gz_inout"])
             self.metrics["test_ap"].update(inout_pred.sigmoid(), batch["inout"].long())
+            if self.dataset == "custom":
+                for group, mask in compute_inout_groups(batch["path"], inout_pred.device).items():
+                    self.metrics[f"test_acc_{group}"].update(inout_pred.sigmoid(), batch["inout"], mask)
 
             # Log metrics
-            self.log("metric/test/auc", self.metrics["test_auc"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/auc", self.metrics["test_auc"], batch_size=gz_ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/plah", self.metrics["test_plah"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
-            self.log("metric/test/dist", self.metrics["test_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("metric/test/dist", self.metrics["test_dist"], batch_size=gz_ni, prog_bar=True, on_step=False, on_epoch=True)
             self.log("metric/test/ap", self.metrics["test_ap"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
+            if self.dataset == "custom":
+                for group in INOUT_GROUPS:
+                    self.log(f"metric/test/acc_{group}", self.metrics[f"test_acc_{group}"], prog_bar=False, on_step=False, on_epoch=True)
 
         # Build output dict
         step_output = {

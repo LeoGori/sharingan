@@ -101,6 +101,10 @@ class Distance(tm.Metric):
         gaze_point_gt: torch.Tensor,
         inout_gt: torch.Tensor,
     ):
+        # Accept gt of shape (b, 2) or (b, 1, 2) (e.g. custom test split, with one annotation per image)
+        if gaze_point_gt.ndim == 3:
+            assert gaze_point_gt.size(1) == 1, f"Expected a single gaze annotation per sample, got shape {tuple(gaze_point_gt.shape)}."
+            gaze_point_gt = gaze_point_gt.squeeze(1)
         mask = inout_gt == 1
         if mask.any():
             self.sum_dist += (gaze_point_gt[mask] - gaze_point_pred[mask]).pow(2).sum(1).sqrt().sum()
@@ -144,6 +148,36 @@ class GFTestDistance(tm.Metric):
         avg_dist = self.sum_avg_dist / self.num_obs
         min_dist = self.sum_min_dist / self.num_obs
         return dist_to_avg, avg_dist, min_dist
+
+
+class MaskedInOutAccuracy(tm.Metric):
+    higher_is_better: bool = True
+    full_state_update: bool = False
+
+    def __init__(self, threshold: float = 0.5):
+        """
+        Computes the in/out classification accuracy over the samples selected by a mask (e.g. a group of samples).
+        For a group whose samples are all out-of-frame, this is the out-of-frame recall of that group.
+        """
+        super().__init__()
+        self.threshold = threshold
+        self.add_state("num_correct", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("num_obs", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+    def update(self, inout_pred: torch.Tensor, inout_gt: torch.Tensor, mask: torch.Tensor):
+        """inout_pred: probabilities (after sigmoid), inout_gt: {0, 1} labels, mask: samples to include."""
+        mask = mask.bool()
+        if mask.any():
+            pred_label = (inout_pred[mask] >= self.threshold).float()
+            self.num_correct += (pred_label == inout_gt[mask].float()).sum()
+            self.num_obs += mask.sum()
+
+    def compute(self):
+        if self.num_obs != 0:
+            acc = self.num_correct / self.num_obs
+        else:
+            acc = torch.tensor(-1000.0, device=self.device)
+        return acc
 
 
 class AUC(tm.Metric):

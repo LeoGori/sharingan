@@ -135,10 +135,16 @@ class Experiment(BaseExperiment):
                 heatmap_sigma=self.cfg.data.heatmap_sigma,
                 num_people=self.cfg.data.num_people,
                 return_head_mask=self.cfg.data.return_head_mask,
+                bg_dir=self.cfg.data.custom.get("bg_dir", None),
+                use_bg_switch=self.cfg.data.custom.get("use_bg_switch", True),
+                use_bg_switch_test=self.cfg.data.custom.get("use_bg_switch_test", False),
+                max_transparent_ratio=self.cfg.data.custom.get("max_transparent_ratio", 0.8),
+                debug_bg_every_n=self.cfg.data.custom.get("debug_bg_every_n", 0),
+                debug_bg_dir=self.cfg.data.custom.get("debug_bg_dir", None),
             )
         else:
             raise ValueError(
-                f"Expected dataset to be one of [gazefollow, videoattentiontarget, childplay]. Got {self.cfg.experiment.dataset}."
+                f"Expected dataset to be one of [gazefollow, videoattentiontarget, childplay, custom]. Got {self.cfg.experiment.dataset}."
             )
         print(
             colored(
@@ -312,7 +318,10 @@ class Experiment(BaseExperiment):
         end = dt.datetime.now()
         print(colored(f"Finished. The experiment took {end - start}.", TERM_COLOR))
 
-        # print(colored(f"Train Set used eyes over {len(self.data.train_dataset.available_data_set)} images: {len(self.data.train_dataset.used_eyes_set)} ({len(self.data.train_dataset.used_eyes_set) / len(self.data.train_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
-        # print(colored(f"Val Set used eyes over {len(self.data.val_dataset.available_data_set)} images: {len(self.data.val_dataset.used_eyes_set)} ({len(self.data.val_dataset.used_eyes_set) / len(self.data.val_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
-        # print(colored(f"Test Set used eyes over {len(self.data.test_dataset.available_data_set)} images: {len(self.data.test_dataset.used_eyes_set)} ({len(self.data.test_dataset.used_eyes_set) / len(self.data.test_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        # if "train" in self.tasks:
+        #     print(colored(f"Train Set used eyes over {len(self.data.train_dataset.available_data_set)} images: {len(self.data.train_dataset.used_eyes_set)} ({len(self.data.train_dataset.used_eyes_set) / len(self.data.train_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        # if "val" in self.tasks or "train" in self.tasks:  # validation is already included in training
+        #     print(colored(f"Val Set used eyes over {len(self.data.val_dataset.available_data_set)} images: {len(self.data.val_dataset.used_eyes_set)} ({len(self.data.val_dataset.used_eyes_set) / len(self.data.val_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
+        # if "test" in self.tasks:
+        #     print(colored(f"Test Set used eyes over {len(self.data.test_dataset.available_data_set)} images: {len(self.data.test_dataset.used_eyes_set)} ({len(self.data.test_dataset.used_eyes_set) / len(self.data.test_dataset.available_data_set) * 100:.2f}%)", TERM_COLOR))
         self._print_eye_usage_summary()

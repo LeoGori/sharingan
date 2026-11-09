@@ -35,10 +35,12 @@ DEFAULT_COLUMNS = [
     "eye_bbox_y_min",
     "eye_bbox_x_max",
     "eye_bbox_y_max",
+    "eyes_det_conf",
     "head_bbox_x_min",
     "head_bbox_y_min",
     "head_bbox_x_max",
     "head_bbox_y_max",
+    "head_det_conf",
     "in_or_out"
 ]
 
@@ -59,7 +61,8 @@ def parse_args() -> argparse.Namespace:
 def load_annotations(path: Path) -> pd.DataFrame:
     for columns in (DEFAULT_COLUMNS, LEGACY_COLUMNS):
         try:
-            frame = pd.read_csv(path, header=None, names=columns, index_col=False)
+            # print(f"Trying to parse annotations in {path} using columns: {columns}")
+            frame = pd.read_csv(path, header=0, names=columns, index_col=False)
         except pd.errors.ParserError:
             continue
 

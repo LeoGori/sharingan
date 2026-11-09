@@ -29,3 +29,11 @@ data
 customData
 samples
 samples-test
+*.png
+*.jpg
+*.mp4
+*.jpeg
+*.zip
+*.jpg
+*.ckpt
+*.log
