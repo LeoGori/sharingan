@@ -1,0 +1,3 @@
+# pixi environment (rebuilt from pixi.toml + pixi.lock with `pixi install`)
+.pixi/
+__pycache__/

@@ -1,0 +1,33 @@
+[workspace]
+name = "sharingan-gaze-yarp"
+description = "YARP module publishing the Sharingan gaze point and inout score"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.10.*"
+yarp-python = "3.12.*"
+numpy = "<2"  # torch 2.3.1 is not compatible with numpy 2
+setuptools = "<81"  # pytorch-lightning 2.1.2 needs pkg_resources (removed in setuptools 81)
+
+# Versions pinned to match the `sharingan` conda environment used for training
+[pypi-dependencies]
+torch = { version = "==2.3.1", index = "https://download.pytorch.org/whl/cu121" }
+torchvision = { version = "==0.18.1", index = "https://download.pytorch.org/whl/cu121" }
+pillow = "==10.4.0"
+omegaconf = "==2.3.0"
+termcolor = "==2.4.0"
+einops = "==0.7.0"
+pandas = "==2.0.3"
+# imported by src/modeling/sharingan.py
+pytorch-lightning = "==2.1.2"
+torchmetrics = "==1.2.1"
+transformers = "==4.35.2"
+wandb = "==0.27.2"
+# SAM3 head detector
+ultralytics = "==8.4.60"
+timm = "==1.0.27"
+clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "81ff68ed7ffcac3b40484c914f104f816757308d" }
+
+[tasks]
+start = "python sharingan_gaze_module.py"
