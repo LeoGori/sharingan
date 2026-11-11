@@ -32,6 +32,12 @@ DEFAULT_CKPT_PATH = REPO_ROOT / "checkpoints" / "gf+vat+ours-head-bg-swap-mg0.ck
 DEFAULT_CONFIG_PATH = REPO_ROOT / "src" / "conf" / "demo.yaml"
 
 
+def _resolve_path(path):
+	"""Resolve a relative path from the config against the repo root, so the module can run from any directory."""
+	path = Path(path).expanduser()
+	return str(path if path.is_absolute() else REPO_ROOT / path)
+
+
 # ============================ HEAD DETECTORS ============================ #
 def _empty_detections():
 	return np.empty((0, 6), dtype=np.float32)
@@ -48,7 +54,7 @@ def _results_to_detections(result, class_id=0):
 
 class YoloHeadDetector:
 	def __init__(self, config, device):
-		ckpt_path = config.get("weights", "./weights/yolov5m_crowdhuman.pt")
+		ckpt_path = _resolve_path(config.get("weights", "./weights/yolov5m_crowdhuman.pt"))
 		self.imgsz = int(config.get("imgsz", 640))
 		self.conf = float(config.get("conf", 0.25))
 		self.model = torch.hub.load("ultralytics/yolov5", "custom", path=ckpt_path, verbose=False)
@@ -79,7 +85,7 @@ class SAMHeadDetector:
 			task=str(config.get("task", "segment")),
 			mode=str(config.get("mode", "predict")),
 			imgsz=int(config.get("imgsz", 644)),
-			model=str(config.get("model", "./weights/sam3.1_multiplex.pt")),
+			model=_resolve_path(config.get("model", "./weights/sam3.1_multiplex.pt")),
 			half=bool(config.get("half", False)),
 			save=bool(config.get("save", False)),
 			verbose=bool(config.get("verbose", False)),
@@ -156,8 +162,9 @@ class SharinganGazeEstimator:
 		Args:
 			image_rgb: (h, w, 3) uint8 RGB array.
 		Returns:
-			(gaze_x, gaze_y, inout) with the gaze point normalized to [0, 1] w.r.t. the image size and the inout
-			probability in [0, 1], or None if no head is detected above the detection threshold.
+			(gaze_x, gaze_y, inout, head_bbox, head_conf) with the gaze point normalized to [0, 1] w.r.t. the image
+			size, the inout probability in [0, 1], the detected head box (x1, y1, x2, y2) in pixels and its detection
+			score, or None if no head is detected above the detection threshold.
 		"""
 		img_h, img_w = image_rgb.shape[:2]
 
@@ -190,4 +197,5 @@ class SharinganGazeEstimator:
 		_, gaze_heatmaps, inouts = self.sharingan(sample)
 		gaze_point = spatial_argmax2d(gaze_heatmaps.squeeze(0).cpu(), normalize=True)[0]  # (2,)
 		inout = torch.sigmoid(inouts.squeeze(0)).flatten().cpu()[0]
-		return float(gaze_point[0]), float(gaze_point[1]), float(inout)
+		head_bbox = tuple(float(v) for v in best[:4])
+		return float(gaze_point[0]), float(gaze_point[1]), float(inout), head_bbox, float(best[4])

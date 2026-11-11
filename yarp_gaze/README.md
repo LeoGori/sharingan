@@ -53,6 +53,7 @@ Options (all optional):
 |---|---|---|
 | `/sharinganGaze/image:i` | `ImageOf<PixelRgb>` | Input RGB image |
 | `/sharinganGaze/gaze:o` | `Bottle` | `gaze_x gaze_y inout` (3 float64) |
+| `/sharinganGaze/outputImage:o` | `ImageOf<PixelRgb>` | Input image with the detected head box (green, with detection score), the gaze point (red dot) and the in-out score written in a banner on top |
 | `/sharinganGaze/rpc` | rpc | `quit` closes the module |
 
 - `gaze_x gaze_y`: gaze point in pixels of the input image (or in [0, 1] with `--normalized`).
